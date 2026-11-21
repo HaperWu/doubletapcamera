@@ -499,7 +499,7 @@ adb shell am start -n com.heytap.tas/com.finshell.setting.activity.WalletSetting
 | `persist.vendor.fingerprint.sensor_type` | `optical`（原值） | 诊断期曾用 resetprop 改成 `side`，已还原（resetprop 本就不持久） |
 | AppFeature 表 | 已删除诊断期插入的行 `_id=309` | 特性名 `com.android.settings.double_tap_power_button_quickapp` |
 | `persist.sys.pkwallet.support` | true（未改） | 框架侧钱包能力开关，诊断期改动无效（开机时读取） |
-| LSPosed 模块 `io.github.doubletapcamera` | 已安装 / 已启用（`Type: modern`）/ 作用域 = system + com.heytap.tas + android + **com.oplus.camera** | **双击电源键现在直开相机**（见 §11）；回滚：`settings put system doubletap_camera_mode 0` 或停用模块 |
+| LSPosed 模块 `io.github.haperwu.doubletapcamera` | 已安装 / 已启用（`Type: modern`）/ 作用域 = system + com.heytap.tas + android + **com.oplus.camera** | **双击电源键现在直开相机**（见 §11）；回滚：`settings put system doubletap_camera_mode 0` 或停用模块 |
 | `system doubletap_camera_volkey` | 1（默认） | 锁屏态相机内「音量键=快门」兜底（§11.12）；0=不接管 |
 | `system doubletap_camera_launch_type` | 未设置（默认 `quick_launch_from_framework`） | 传给相机的 `android_camera_launch_type`（§11.12.5） |
 | `system doubletap_camera_mode` | 2（默认，= 只在 system_server 生效） | 模块模式位：0 关 / 1 钱包进程 / 2 system_server / 3 都开 |
@@ -548,10 +548,20 @@ ColorOS 自己的「相机/快捷应用」分支要求侧边指纹（本机 `per
 
 | 包内文件 | 内容 |
 |---|---|
-| `META-INF/xposed/java_init.list` | 入口类全名 `io.github.doubletapcamera.HookEntry` |
+| `META-INF/xposed/java_init.list` | 入口类全名 `io.github.haperwu.doubletapcamera.HookEntry` |
 | `META-INF/xposed/module.prop` | `minApiVersion=100` / `targetApiVersion=102` / `staticScope=false` |
 | `META-INF/xposed/scope.list` | `system`（=system_server）/ `com.heytap.tas` / `android` / `com.oplus.camera`（相机进程，§11.12 的音量键兜底） |
 | `AndroidManifest.xml` | **不要** `xposedminversion`、**不要** `xposedscope` |
+
+> ⚠️ **`system` 这一项不能删**（2026-11-21 实测）：把 scope.list 里的 `system` 去掉、只留 `android`，
+> 模块**不会**再被注入 system_server —— 双击电源键什么都不开、日志里一条 `DblTapCam` 都没有，
+> 而管理器里又显示「已启用 / 作用域已勾选」，极具迷惑性。
+> LSPosed 的作用域里，**「系统框架(system)」与「Android 系统(android)」是两个并列且互相独立的条目**：
+> `system` 才是 system_server（我们要 hook 厂商 `OplusWalletController` 的进程），
+> `android` 指的是 Android 框架 app（SystemUI 所在包）。
+> 判据：重启后 `adb logcat -d | grep DblTapCam` 或 LSPosed 日志里出现
+> `module loaded: process=system isSystemServer=true api=102` 才算注入成功；
+> 另外 LSPosed 是在开机后约 30 s 才加载模块，太早测试会误判为「没生效」。
 
 入口类必须 `extends io.github.libxposed.api.XposedModule`，
 实现 `onSystemServerStarting(SystemServerStartingParam)`（用 `param.getClassLoader()` 找厂商类）
@@ -567,14 +577,14 @@ adb reboot                                      # 必须重启：system_server �
 `lspdb.sh` 要点：
 * LSPosed 2.2.1 的 `lspctl` 只有 `status`/`stop`；要先在管理器「设置 → 调试 → **开发者模式**」打开，
   才有 `module` / `scope` / `hook-debug` 子命令；
-* 也可以用 CLI：`lspctl scope add --user=0 io.github.doubletapcamera system`（输出 "Scope updated; reboot required"）；
+* 也可以用 CLI：`lspctl scope add --user=0 io.github.haperwu.doubletapcamera system`（输出 "Scope updated; reboot required"）；
 * 配置文件 `/data/adb/lspd/config/modules_config.db`（表：`modules` / `modules_state` / `scope`）；
   **每次重装 APK 后 apk_path 都会变，必须重跑 `lspdb.sh`，否则模块不会被加载**；
 * `app_process` 直写这个 SQLite 会被杀（`Bad file descriptor`，没有 binder fd）——改成宿主机 python sqlite3 改库再 push。
 
 ### 11.5 验证
 ```bash
-adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module show io.github.doubletapcamera'
+adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module show io.github.haperwu.doubletapcamera'
 #   期望：API: min=100 target=102 / Type: modern / User 0: enabled
 adb shell su -c 'cat /data/adb/lspd/log/modules_*.log' | tail
 #   期望：DblTapCam: getWalletSwitchState -> force 1 / startWallet intercepted -> camera (ctx=true)
@@ -590,10 +600,10 @@ adb logcat -d | grep -E 'DblTapCam|start wallet|STILL_IMAGE_CAMERA'
 # 1) 最快：关掉模式（hook 每次调用都读这个设置，无需重启）
 adb shell settings put system doubletap_camera_mode 0
 # 2) 停用模块（管理器里关开关，或 CLI）
-adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module disable io.github.doubletapcamera'
+adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module disable io.github.haperwu.doubletapcamera'
 adb reboot
 # 3) 彻底卸载
-adb uninstall io.github.doubletapcamera
+adb uninstall io.github.haperwu.doubletapcamera
 ```
 回滚后系统回到原生行为：**双击电源键 → 钱包**（受钱包自身开关控制）；
 想恢复「双击电源键刷卡」，在 钱包 → 设置 → 双击电源键 里重新打开「双击电源键唤起快捷服务」。
