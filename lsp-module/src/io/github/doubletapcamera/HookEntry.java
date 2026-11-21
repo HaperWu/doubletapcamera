@@ -39,6 +39,14 @@ import io.github.libxposed.api.XposedModuleInterface;
  */
 public class HookEntry extends XposedModule {
 
+    /**
+     * 相机快门触发计数（相机进程内）。
+     * 用来自校准：音量键事件走完相机的原生处理后，如果这个计数没有增加，
+     * 说明相机的原生「音量键=快门」在当前启动模式下是失效的（锁屏快捷启动模式），
+     * 这时才由我们兜底去点快门按钮；否则（解锁态原生功能正常）不重复点击，避免连拍两张。
+     */
+    private static volatile int sShutterCount = 0;
+
     private static final String TAG = "DblTapCam";
     private static final String CFG = "doubletap_camera_mode";
     private static final String CFG_SECURE = "doubletap_camera_secure";
@@ -144,6 +152,7 @@ public class HookEntry extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         String pkg = param.getPackageName();
         if (CAMERA_PKG.equals(pkg)) {
+            hookCameraShutterCounter(param.getDefaultClassLoader());
             hookCameraVolumeKey(param.getDefaultClassLoader());
             return;
         }
@@ -199,6 +208,35 @@ public class HookEntry extends XposedModule {
      * 兜底：锁屏 + 音量键 -> 直接点相机的快门按钮（com.oplus.camera.control.ShutterButton）。
      * 只在相机设置里「音量键功能 = 快门」时接管。
      */
+    /**
+     * hook 相机的快门处理方法（com.oplus.camera.ui.control.CameraControlUI$f.d(ShutterButton, int)，
+     * 它会打印 "onShutterButtonClick, ShutterButton.id: ..."），用于自校准：
+     * 音量键事件走完相机的原生处理后，如果计数没有增加，说明原生音量键功能在当前模式下失效。
+     */
+    private void hookCameraShutterCounter(ClassLoader cl) {
+        Class<?> c = findClass(cl, "com.oplus.camera.ui.control.CameraControlUI$f");
+        if (c == null) {
+            log("camera shutter handler class not found");
+            return;
+        }
+        try {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!"d".equals(m.getName()) || m.getParameterTypes().length != 2) {
+                    continue;
+                }
+                m.setAccessible(true);
+                hook(m).intercept(chain -> {
+                    Object r = chain.proceed();
+                    sShutterCount++;
+                    return r;
+                });
+                log("camera shutter handler hooked: " + m);
+            }
+        } catch (Throwable t) {
+            log("hook camera shutter handler failed: " + t);
+        }
+    }
+
     private void hookCameraVolumeKey(ClassLoader cl) {
         Class<?> cam = findClass(cl, CAMERA_PKG + ".Camera");
         if (cam == null) {
@@ -209,9 +247,10 @@ public class HookEntry extends XposedModule {
             final Method m = cam.getDeclaredMethod("onKeyDown", int.class, KeyEvent.class);
             m.setAccessible(true);
             hook(m).intercept(chain -> {
+                int keyCode = (Integer) chain.getArg(0);
+                int shutterBefore = sShutterCount;
                 Object ret = chain.proceed();
                 try {
-                    int keyCode = (Integer) chain.getArg(0);
                     if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) {
                         return ret;
                     }
@@ -220,7 +259,7 @@ public class HookEntry extends XposedModule {
                         return ret;
                     }
                     Activity act = (Activity) self;
-                    if (volKeyEnabled(act) == 0 || !isKeyguardLocked(act)) {
+                    if (volKeyEnabled(act) == 0) {
                         return ret;
                     }
                     String fn = readVolKeyFunction(act);
@@ -228,12 +267,18 @@ public class HookEntry extends XposedModule {
                         log("volume key function=" + fn + " (not shutter) -> skip");
                         return ret;
                     }
+                    if (sShutterCount != shutterBefore) {
+                        // 相机的原生音量键处理已经触发了快门（解锁态），不要重复点击
+                        log("volume key handled natively (shutter " + shutterBefore + " -> " + sShutterCount + ")");
+                        return ret;
+                    }
+                    // 原生处理没有触发快门（锁屏快捷启动模式下相机会禁用音量键功能）→ 兜底点快门
                     View v = findShutterView(act.getWindow() != null ? act.getWindow().getDecorView() : null);
                     if (v != null) {
-                        log("lockscreen volume key -> shutter click (" + v.getClass().getName() + ")");
+                        log("volume key fallback -> shutter click (" + v.getClass().getName() + ")");
                         v.performClick();
                     } else {
-                        log("lockscreen volume key -> shutter view not found");
+                        log("volume key fallback -> shutter view not found");
                     }
                 } catch (Throwable t) {
                     log("volume key fallback error: " + t);

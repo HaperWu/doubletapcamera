@@ -854,23 +854,46 @@ V OCAM_CameraEntry: isLockScreenStart, mAction: ..., mbSecureStartFromFramework:
 `Lm5/c9;->get` 会打印 `onCreate, this: ..., isKeyguardLocked: ..., isSpruceOrActionLaunch: ...`），
 不是由 Intent / extra 决定的 ⇒ **不是模块造成的，也换不掉**。
 
-补充证据：解锁态打开相机时音量键是正常的（用户实测），这与「锁屏快捷启动模式禁用音量键」一致；
-而 ADB 注入的 `input keyevent 24` 即使在解锁态也不会触发快门（注入事件与真实按键不等价），
-所以**只能用真实按键验证**。
+##### ⚠ 重要更正（真机按键复测后）
 
-#### 11.12.3 模块兜底：第三个 hook（相机进程内）
+* **ADB 注入的音量键在「解锁 + 普通 action 启动」的相机里同样不会触发快门**
+  （`onShutterButtonClick` 计数 = 0）。⇒ 注入事件与真实按键不等价，
+  **任何用 `input keyevent 24` 得出的「解锁态音量键正常」结论都不成立**，只能真机按键验证。
+* 模块第一版用 `KeyguardManager.isKeyguardLocked()` 作为兜底触发条件是**错的**：
+  相机启动时会主动 dismiss keyguard——
 
-模块新增作用域 `com.oplus.camera`，在相机进程里 hook
-`com.oplus.camera.Camera.onKeyDown(int, KeyEvent)`：
+  ```
+  I ActivityTaskManager: Activity requesting to dismiss Keyguard: ActivityRecord{... com.oplus.camera/.Camera}
+  V FlexibleTaskController: notifyKeyguardStateChanged keyguardShowing = false
+  ```
 
-* 条件：音量键（`KEYCODE_VOLUME_UP/DOWN`） **且** 设备处于锁屏 **且**
-  相机自己的「音量键功能」是 `shutter`（读相机自己的 MMKV `files/mmkv/com.oplus.camera_preferences`
-  里的 `pref_volume_key_function_key`，MMKV 的字节布局是 `[keyLen][key][valLen][valType][value…]`）；
-* 动作：在相机视图树里找 `com.oplus.camera.control.MainShutterButton`（类名含 `ShutterButton`）
-  并 `performClick()` —— 走的是相机**自己的快门逻辑**，不是模拟按键。
+  （没有锁屏凭据时 keyguard 直接被 dismiss ⇒ `isKeyguardLocked()` 变成 **false**
+  ⇒ 兜底分支永远进不去 ⇒ 用户真机按音量键「还是不行」）。
+* 真正的判据不是「现在锁没锁屏」，而是「**相机的原生音量键处理这次有没有真的触发快门**」。
 
-解锁态一律不接管（`KeyguardManager.isKeyguardLocked()` 为 false 直接放行），
-所以相机原生音量键行为完全不受影响。
+#### 11.12.3 模块兜底：第三个 hook（相机进程内）+ 快门计数自校准
+
+模块新增作用域 `com.oplus.camera`，在相机进程里 hook 两个方法：
+
+| # | hook 目标 | 作用 |
+|---|---|---|
+| 1 | `com.oplus.camera.ui.control.CameraControlUI$f.d(ShutterButton, int)` | 相机**快门处理入口**（打印 `onShutterButtonClick, ShutterButton.id: …`），每触发一次就 `sShutterCount++` |
+| 2 | `com.oplus.camera.Camera.onKeyDown(int, KeyEvent)` | 音量键事件（打印 `Key down has been intercepted`） |
+
+`onKeyDown` 里的判定顺序：
+
+1. 键码是 `KEYCODE_VOLUME_UP/DOWN`，否则放行；
+2. `Settings.System doubletap_camera_volkey`（默认 1）为 0 则放行；
+3. 相机自己的「音量键功能」必须是 `shutter`（读相机 MMKV `files/mmkv/com.oplus.camera_preferences`
+   的 `pref_volume_key_function_key`，MMKV 字节布局 `[keyLen][key][valLen][valType][value…]`），
+   否则放行（用户改成 zoom/volume 时不接管）；
+4. **自校准**：`chain.proceed()` 前后比较 `sShutterCount`
+   * 计数**增加** ⇒ 相机的原生音量键处理这次真的触发了快门（解锁态正常）⇒ **不重复点击**（避免连拍两张）；
+   * 计数**没变** ⇒ 原生处理这次是哑的（锁屏快捷启动模式）⇒ 在视图树里找类名含 `ShutterButton` 的 View
+     （`com.oplus.camera.control.MainShutterButton`）并 `performClick()`，走相机**自己的快门逻辑**。
+
+关键点：**不再用 `isKeyguardLocked()` 判断**，因此相机自己 dismiss 掉 keyguard 之后依然能兜底；
+同时因为有快门计数，解锁态原生功能正常时不会多拍一张。
 
 #### 11.12.4 验证（锁屏态真实链路日志）
 
@@ -879,22 +902,23 @@ adb shell am force-stop com.oplus.camera
 adb shell input keyevent 26            # 息屏 -> 锁屏
 adb shell input keyevent 224           # 亮屏
 adb shell "input keyevent 26 26"       # 锁屏双击 -> 相机盖在锁屏上
-adb shell input keyevent 24            # 音量↑（真实按键同理）
-adb logcat -d | grep -E "DblTapCam|Shutter"
+adb logcat -c
+adb shell input keyevent 24            # 音量↑（注入只验证兜底链路；真机按键才有代表性）
+adb logcat -d | grep -E "DblTapCam|Shutter|intercepted"
 ```
 
-实测输出（已通过）：
+期望日志链：
 
 ```
 W OCAM_OplusCamera: Key down has been intercepted
-I DblTapCam: lockscreen volume key -> shutter click (com.oplus.camera.control.MainShutterButton)
+I DblTapCam: volume key fallback -> shutter click (com.oplus.camera.control.MainShutterButton)
 E OCAM_CameraControlUI: onShutterButtonClick, ShutterButton.id: 2131297655
 W OCAM_CommonCapMode: onCameraShutterButtonClick
 E OCAM_g1_BaseMode: CameraTest Shutter Respond Start, count: 0
 ```
 
-解锁态复测：设备 `deviceLocked=0` 时按音量键，**不出现** `lockscreen volume key -> shutter`，
-只有相机自己的 `Key down has been intercepted` ⇒ 未解锁时模块不介入。
+若原生路径生效（解锁态），则应看到 `I DblTapCam: volume key handled natively (shutter N -> N+1)`，
+且**不会**出现 `volume key fallback`。
 
 #### 11.12.5 新增开关
 
