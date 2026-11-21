@@ -612,3 +612,52 @@ adb uninstall io.github.doubletapcamera
 | `disasm.py` | 极简反汇编（const / const-string / invoke） |
 | `arsc2.py` | resources.arsc 解析（资源 ID → 名称/取值） |
 | `lspdb.sh` | 直接改 LSPosed 配置库（启用模块 + 作用域 + apk_path） |
+
+### 11.9 锁屏有密码时相机拉不起来（keyguard 问题）
+
+**现象**：亮屏/解锁状态下双击电源键能直接进相机；**锁屏且设了密码时，相机被启动但落在锁屏后面，
+必须先解锁才看得到**。
+
+**原因**：模块原本用的是普通 action
+`android.media.action.STILL_IMAGE_CAMERA`（+ `package com.oplus.camera`）。
+普通入口的相机 Activity **没有 `android:showWhenLocked`**（ColorOS 相机的锁屏快拍用的是另一套「安全相机」入口），
+所以系统把它放在 keyguard 之后。钱包的 NFC 页之所以能盖在锁屏上，是因为它的 3 个 activity
+在 manifest 里声明了 `android:showWhenLocked="true"`。
+
+**修法**：锁屏时改用 ColorOS 自己的「安全相机」入口。把它从厂商代码里反出来
+（`com.android.server.policy.PhoneWindowManagerExtImpl.startCamera`，反汇编结果）：
+
+```java
+Intent i = new Intent();
+i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);          // 0x10000000
+i.putExtra("caller_package", "android");
+i.putExtra("mode", 29);
+i.putExtra("lunch_type", 2);
+i.setAction("android.media.action.STILL_IMAGE_CAMERA_SECURE");
+i.setComponent(new ComponentName("com.oplus.camera", "com.oplus.camera.Camera"));
+context.startActivityAsUser(i, userId);
+```
+
+模块现在的策略（`HookEntry.startCamera`）：
+
+| 情况 | 启动方式 |
+|---|---|
+| 锁屏（`KeyguardManager.isKeyguardLocked()` = true） | 先用上面的 **secure 入口**；失败则回退普通入口 |
+| 未锁屏 | 普通入口（`STILL_IMAGE_CAMERA` + `need_screen_on=true`） |
+| 强制 | `adb shell settings put system doubletap_camera_secure 1`（一直用 secure）/ `2`（禁用） |
+
+对应源码里的 `CAMERA_SECURE_ACTION = "android.media.action.STILL_IMAGE_CAMERA_SECURE"`、
+`CAMERA_SECURE_COMPONENT = "com.oplus.camera.Camera"`。
+
+**验证脚本**（仓库内）：
+```bash
+bash scripts/locktest.sh      # 锁屏双击 → 看前台 Activity + 日志
+bash scripts/lockvariants.sh  # 锁屏下逐个试探 5 种 Intent 写法，看哪种能盖在锁屏上
+```
+> 注意：注入双击必须用**同一个 input 进程**连发两次：`adb shell "input keyevent 26 26"`；
+> 分两次 `adb shell` 的间隔会超过 `multi_press_timeout`(300ms)，判定不成立。
+
+**已知边界**：即便相机盖在锁屏上，**按下快门拍照仍可能要求先解锁**——这是 Android 对带密码锁屏的安全策略
+（相机可以显示，但拍摄动作需要认证）。若手机支持「锁屏快拍」且要求输入密码，可配合系统的
+「锁屏下不输入密码即可拍照」开关使用。
+

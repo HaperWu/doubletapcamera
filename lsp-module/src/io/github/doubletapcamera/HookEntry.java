@@ -1,6 +1,8 @@
 package io.github.doubletapcamera;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.provider.Settings;
@@ -34,9 +36,13 @@ public class HookEntry extends XposedModule {
 
     private static final String TAG = "DblTapCam";
     private static final String CFG = "doubletap_camera_mode";
+    private static final String CFG_SECURE = "doubletap_camera_secure";
 
     private static final String CAMERA_PKG = "com.oplus.camera";
     private static final String CAMERA_ACTION = "android.media.action.STILL_IMAGE_CAMERA";
+    /** 厂商自己的「安全相机」入口：可在锁屏之上唤起（锁屏快拍） */
+    private static final String CAMERA_SECURE_ACTION = "android.media.action.STILL_IMAGE_CAMERA_SECURE";
+    private static final String CAMERA_SECURE_COMPONENT = "com.oplus.camera.Camera";
 
     /** 钱包里可能被「双击电源键」拉起的 Activity */
     private static final Set<String> WALLET_ACTIVITIES = new HashSet<>(Arrays.asList(
@@ -189,7 +195,40 @@ public class HookEntry extends XposedModule {
         }
     }
 
+    /**
+     * 拉起相机。
+     *
+     * 锁屏（有 keyguard）时，普通 action 启动的相机会落在锁屏后面，用户必须先解锁才能看到。
+     * ColorOS 自己启动相机用的是「secure camera」入口（反编译自
+     * com.android.server.policy.PhoneWindowManagerExtImpl.startCamera）：
+     *   action    = android.media.action.STILL_IMAGE_CAMERA_SECURE
+     *   component = com.oplus.camera.Camera
+     *   extras    = caller_package=android / mode=29 / lunch_type=2
+     *   flags     = FLAG_ACTIVITY_NEW_TASK
+     * 走这个入口相机才能盖在锁屏上（锁屏快拍）。
+     */
     private static void startCamera(Context ctx) {
+        if (ctx == null) {
+            return;
+        }
+        int secureMode = secureMode(ctx);          // 0=自动 1=强制 2=禁用
+        boolean locked = isKeyguardLocked(ctx);
+        if (secureMode == 1 || (secureMode == 0 && locked)) {
+            try {
+                Intent si = new Intent();
+                si.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                si.putExtra("caller_package", "android");
+                si.putExtra("mode", 29);
+                si.putExtra("lunch_type", 2);
+                si.setAction(CAMERA_SECURE_ACTION);
+                si.setComponent(new ComponentName(CAMERA_PKG, CAMERA_SECURE_COMPONENT));
+                ctx.startActivity(si);
+                android.util.Log.i(TAG, "camera launched (secure/锁屏路径, locked=" + locked + ")");
+                return;
+            } catch (Throwable t) {
+                android.util.Log.i(TAG, "secure camera launch failed: " + t + " -> fallback");
+            }
+        }
         Intent i = new Intent(CAMERA_ACTION);
         i.setPackage(CAMERA_PKG);
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -197,6 +236,29 @@ public class HookEntry extends XposedModule {
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         i.putExtra("need_screen_on", true);
         ctx.startActivity(i);
+        android.util.Log.i(TAG, "camera launched (normal, locked=" + locked + ")");
+    }
+
+    /** 当前是否处于锁屏（keyguard）状态 */
+    private static boolean isKeyguardLocked(Context ctx) {
+        try {
+            KeyguardManager km = (KeyguardManager) ctx.getSystemService(Context.KEYGUARD_SERVICE);
+            return km != null && km.isKeyguardLocked();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Settings.System "doubletap_camera_secure"：0=自动(锁屏时用 secure 入口) 1=强制 2=禁用 */
+    private static int secureMode(Context ctx) {
+        if (ctx == null) {
+            return 0;
+        }
+        try {
+            return Settings.System.getInt(ctx.getContentResolver(), CFG_SECURE, 0);
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /**
