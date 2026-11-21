@@ -7,10 +7,15 @@
 > 现象：双击电源键 → 弹出「钱包 / NFC 刷卡页」，而不是相机。
 
 **Releases**：<https://github.com/HaperWu/doubletapcamera/releases> （`doubletap-camera.apk` 为已签名可用包）
-**最新**：<https://github.com/HaperWu/doubletapcamera/releases/download/v1.0.3/doubletap-camera.apk>
-（v1.0.3 的 APK SHA-256 `7716da68f0d87d6eb1961e4e5a93de50645856c70dd83facdac1809422a00f47`，
-同签名可直接覆盖升级；本次修掉了「锁屏双击打开的相机只能拍一张照片」——见 §3.4.3）
-**包名**：`io.github.doubletapcamera`
+**最新**：<https://github.com/HaperWu/doubletapcamera/releases/download/v1.1.1/doubletap-camera.apk>
+（v1.1.1 修掉了「锁屏双击打开的相机只能拍一张照片」——见 §3.4.3；APK SHA-256 `6c3129a3ab3477987a326db5157e1822583bdd4b2ddb4dd29d48d31d47834353`，
+同签名可直接覆盖升级）
+**LSPosed 模块仓库**：<https://modules.lsposed.org/module/io.github.haperwu.doubletapcamera/> （已提交收录，可直接搜「双击电源键直开相机」安装）
+**包名**：`io.github.haperwu.doubletapcamera`
+
+> ⚠️ **v1.1.0 起包名由 `io.github.doubletapcamera` 改为 `io.github.haperwu.doubletapcamera`**
+> （Xposed Module Repository 要求 `io.github.{GitHub 用户名}.{模块名}` 形式）。
+> 新旧包名不同、可并存，**请先卸载旧版**再装新版，避免 LSPosed 里同时挂着两个模块。
 
 ---
 
@@ -109,7 +114,7 @@ adb reboot                             # 必须重启：system_server 注入发�
 ### 3.3 验证
 
 ```bash
-adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module show io.github.doubletapcamera'
+adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module show io.github.haperwu.doubletapcamera'
 #   期望：API: min=100 target=102 / Type: modern / User 0: enabled
 
 adb shell su -c 'cat /data/adb/lspd/log/modules_*.log' | tail
@@ -257,9 +262,9 @@ adb shell "ls -lt /sdcard/DCIM/Camera/ | sed -n '2,4p'"
 
 ```bash
 adb shell settings put system doubletap_camera_mode 0        # 最快，无需重启
-adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module disable io.github.doubletapcamera'
+adb shell su -c '/data/adb/modules/zygisk_lsposed/lspctl module disable io.github.haperwu.doubletapcamera'
 adb reboot
-adb uninstall io.github.doubletapcamera                        # 彻底卸载
+adb uninstall io.github.haperwu.doubletapcamera                        # 彻底卸载
 ```
 
 回滚后回到原生行为：**双击电源键 → 钱包**（受钱包自身开关控制）；
@@ -287,7 +292,7 @@ scripts/                         设备侧复现与判定脚本
 
 | 包内文件 | 内容 |
 |---|---|
-| `META-INF/xposed/java_init.list` | 入口类全名 `io.github.doubletapcamera.HookEntry` |
+| `META-INF/xposed/java_init.list` | 入口类全名 `io.github.haperwu.doubletapcamera.HookEntry` |
 | `META-INF/xposed/module.prop` | `minApiVersion=100` / `targetApiVersion=102` / `staticScope=false` |
 | `META-INF/xposed/scope.list` | `system`（=system_server）/ `com.heytap.tas` / `android` |
 | `AndroidManifest.xml` | **不要** `xposedminversion`、**不要** `xposedscope` |

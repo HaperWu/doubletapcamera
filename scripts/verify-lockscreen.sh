@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-PKG=io.github.doubletapcamera
+PKG=io.github.haperwu.doubletapcamera
 PIN="${1:-}"
 LOGS="build/locktest-$(date +%H%M%S).log"
 

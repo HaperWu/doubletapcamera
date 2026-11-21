@@ -1,4 +1,4 @@
-package io.github.doubletapcamera;
+package io.github.haperwu.doubletapcamera;
 
 import android.app.Activity;
 import android.app.KeyguardManager;
