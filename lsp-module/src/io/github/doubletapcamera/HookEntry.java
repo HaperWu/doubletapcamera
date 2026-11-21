@@ -7,7 +7,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.KeyEvent;
+import android.view.View;
+import android.view.ViewGroup;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -39,6 +44,23 @@ public class HookEntry extends XposedModule {
     private static final String CFG_SECURE = "doubletap_camera_secure";
     /** 锁屏时用哪个相机入口：0=默认(secure 相机) 1=CapturePhotoActivity 直拍 2=普通相机 */
     private static final String CFG_LOCK_ACT = "doubletap_camera_lock_act";
+    /**
+     * 传给相机的启动来源标记（extra: android_camera_launch_type）。
+     * 相机 CameraEntry.d(String) 会把它和下面这些常量比较：
+     *   gimbal_launch_from_framework / quick_launch_from_framework /
+     *   quick_launch_from_smart_button / watch_launch_from_framework /
+     *   spruce_double_tap_launch_from_framework / action_button_launch_from_framework
+     * 其中 spruce_double_tap_launch_from_framework 是 ColorOS「快捷手势双击拍照」用的，
+     * 相机会把它当成 isSpruceOrActionLaunch（不是锁屏快捷启动模式）。
+     */
+    private static final String CFG_LAUNCH_TYPE = "doubletap_camera_launch_type";
+    private static final String DEFAULT_LAUNCH_TYPE = "quick_launch_from_framework";
+    /** Settings.System "doubletap_camera_volkey"：0=关 1=锁屏时音量键=快门（默认 1） */
+    private static final String CFG_VOLKEY = "doubletap_camera_volkey";
+    /** 相机「音量键功能」= 快门 时才接管 */
+    private static final String VOLKEY_SHUTTER = "shutter";
+    /** 相机设置里存「音量键功能」的 MMKV key */
+    private static final String VOLKEY_PREF_KEY = "pref_volume_key_function_key";
 
     private static final String CAMERA_PKG = "com.oplus.camera";
     private static final String CAMERA_ACTION = "android.media.action.STILL_IMAGE_CAMERA";
@@ -121,6 +143,10 @@ public class HookEntry extends XposedModule {
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         String pkg = param.getPackageName();
+        if (CAMERA_PKG.equals(pkg)) {
+            hookCameraVolumeKey(param.getDefaultClassLoader());
+            return;
+        }
         if (!"com.heytap.tas".equals(pkg)) {
             return;
         }
@@ -161,6 +187,156 @@ public class HookEntry extends XposedModule {
     }
 
     /* ---------------- 公共工具 ---------------- */
+
+    /* ---------------- 相机进程：锁屏快捷启动模式下补回「音量键=快门」 ---------------- */
+
+    /**
+     * 锁屏（含密码）时双击电源键拉起相机，ColorOS 相机会进入「锁屏快捷启动」模式
+     * （日志：OCAM_EventMessageUIContainerContext: setLockScreenStart: true）。
+     * 该模式下相机自己的音量键功能被禁用：音量键事件送到了相机
+     * （OCAM_OplusCamera: Key down has been intercepted），但快门/变焦监听没有生效。
+     *
+     * 兜底：锁屏 + 音量键 -> 直接点相机的快门按钮（com.oplus.camera.control.ShutterButton）。
+     * 只在相机设置里「音量键功能 = 快门」时接管。
+     */
+    private void hookCameraVolumeKey(ClassLoader cl) {
+        Class<?> cam = findClass(cl, CAMERA_PKG + ".Camera");
+        if (cam == null) {
+            log("camera class not found: " + CAMERA_PKG + ".Camera");
+            return;
+        }
+        try {
+            final Method m = cam.getDeclaredMethod("onKeyDown", int.class, KeyEvent.class);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                Object ret = chain.proceed();
+                try {
+                    int keyCode = (Integer) chain.getArg(0);
+                    if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) {
+                        return ret;
+                    }
+                    Object self = chain.getThisObject();
+                    if (!(self instanceof Activity)) {
+                        return ret;
+                    }
+                    Activity act = (Activity) self;
+                    if (volKeyEnabled(act) == 0 || !isKeyguardLocked(act)) {
+                        return ret;
+                    }
+                    String fn = readVolKeyFunction(act);
+                    if (fn != null && !VOLKEY_SHUTTER.equals(fn)) {
+                        log("volume key function=" + fn + " (not shutter) -> skip");
+                        return ret;
+                    }
+                    View v = findShutterView(act.getWindow() != null ? act.getWindow().getDecorView() : null);
+                    if (v != null) {
+                        log("lockscreen volume key -> shutter click (" + v.getClass().getName() + ")");
+                        v.performClick();
+                    } else {
+                        log("lockscreen volume key -> shutter view not found");
+                    }
+                } catch (Throwable t) {
+                    log("volume key fallback error: " + t);
+                }
+                return ret;
+            });
+            log("camera onKeyDown hooked");
+        } catch (Throwable t) {
+            log("hook camera onKeyDown failed: " + t);
+        }
+    }
+
+    /** Settings.System "doubletap_camera_volkey"：0=关 1=锁屏时音量键=快门（默认 1） */
+    private static int volKeyEnabled(Context ctx) {
+        if (ctx == null) {
+            return 1;
+        }
+        try {
+            return Settings.System.getInt(ctx.getContentResolver(), CFG_VOLKEY, 1);
+        } catch (Throwable t) {
+            return 1;
+        }
+    }
+
+    /** 在视图树里找相机的快门按钮 */
+    private static View findShutterView(View root) {
+        if (root == null) {
+            return null;
+        }
+        String cn = root.getClass().getName();
+        if (cn.contains("ShutterButton")) {
+            return root;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View v = findShutterView(g.getChildAt(i));
+                if (v != null) {
+                    return v;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 读相机自己的「音量键功能」设置（MMKV: files/mmkv/com.oplus.camera_preferences）。
+     * 文件里 key 的布局：[keyLen][key][valLen][valType][value...]，
+     * 这里按字节扫描；取不到返回 null（调用方按「快门」处理）。
+     */
+    private static String readVolKeyFunction(Context ctx) {
+        try {
+            File f = new File(ctx.getFilesDir(), "mmkv/com.oplus.camera_preferences");
+            if (!f.exists()) {
+                return null;
+            }
+            byte[] data = readAll(f);
+            byte[] key = VOLKEY_PREF_KEY.getBytes();
+            for (int i = 0; i + key.length + 2 < data.length; i++) {
+                boolean hit = true;
+                for (int j = 0; j < key.length; j++) {
+                    if (data[i + j] != key[j]) {
+                        hit = false;
+                        break;
+                    }
+                }
+                if (!hit) {
+                    continue;
+                }
+                int p = i + key.length;
+                int valLen = data[p] & 0xff;
+                if (valLen <= 1 || p + valLen >= data.length) {
+                    continue;
+                }
+                return new String(data, p + 2, valLen - 1);
+            }
+        } catch (Throwable t) {
+            // ignore
+        }
+        return null;
+    }
+
+    private static byte[] readAll(File f) throws Exception {
+        byte[] buf = new byte[(int) f.length()];
+        FileInputStream in = new FileInputStream(f);
+        try {
+            int off = 0;
+            while (off < buf.length) {
+                int n = in.read(buf, off, buf.length - off);
+                if (n <= 0) {
+                    break;
+                }
+                off += n;
+            }
+        } finally {
+            try {
+                in.close();
+            } catch (Throwable ignore) {
+                // ignore
+            }
+        }
+        return buf;
+    }
 
     private void hook(Method m, XposedInterface.Hooker h) {
         hook(m).setPriority(XposedInterface.PRIORITY_DEFAULT).intercept(h);
@@ -226,7 +402,7 @@ public class HookEntry extends XposedModule {
                     ci.setPackage(CAMERA_PKG);
                     ci.setComponent(new ComponentName(CAMERA_PKG, CAMERA_CAPTURE_COMPONENT));
                     ci.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    ci.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+                    ci.putExtra("android_camera_launch_type", launchType(ctx));
                     ci.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
                     ctx.startActivity(ci);
                     android.util.Log.i(TAG, "camera launched (capture/锁屏直拍, locked=" + locked + ")");
@@ -247,7 +423,7 @@ public class HookEntry extends XposedModule {
                 // 正规快捷启动」，从而决定锁屏时是否允许盖在 keyguard 之上：
                 //   android_camera_launch_type  = quick_launch_from_framework
                 //   extra_key_caller_package_name = com.oplus.gesture
-                si.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+                si.putExtra("android_camera_launch_type", launchType(ctx));
                 si.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
                 ctx.startActivity(si);
                 android.util.Log.i(TAG, "camera launched (secure/锁屏路径, locked=" + locked + ")");
@@ -262,7 +438,7 @@ public class HookEntry extends XposedModule {
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         i.putExtra("need_screen_on", true);
-        i.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+        i.putExtra("android_camera_launch_type", launchType(ctx));
         i.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
         ctx.startActivity(i);
         android.util.Log.i(TAG, "camera launched (normal, locked=" + locked + ")");
@@ -287,6 +463,19 @@ public class HookEntry extends XposedModule {
             return Settings.System.getInt(ctx.getContentResolver(), CFG_SECURE, 0);
         } catch (Throwable t) {
             return 0;
+        }
+    }
+
+    /** Settings.System "doubletap_camera_launch_type"：传给相机的启动来源标记 */
+    private static String launchType(Context ctx) {
+        if (ctx == null) {
+            return DEFAULT_LAUNCH_TYPE;
+        }
+        try {
+            String v = Settings.System.getString(ctx.getContentResolver(), CFG_LAUNCH_TYPE);
+            return (v == null || v.length() == 0) ? DEFAULT_LAUNCH_TYPE : v;
+        } catch (Throwable t) {
+            return DEFAULT_LAUNCH_TYPE;
         }
     }
 

@@ -499,7 +499,9 @@ adb shell am start -n com.heytap.tas/com.finshell.setting.activity.WalletSetting
 | `persist.vendor.fingerprint.sensor_type` | `optical`（原值） | 诊断期曾用 resetprop 改成 `side`，已还原（resetprop 本就不持久） |
 | AppFeature 表 | 已删除诊断期插入的行 `_id=309` | 特性名 `com.android.settings.double_tap_power_button_quickapp` |
 | `persist.sys.pkwallet.support` | true（未改） | 框架侧钱包能力开关，诊断期改动无效（开机时读取） |
-| LSPosed 模块 `io.github.doubletapcamera` | 已安装 / 已启用（`Type: modern`）/ 作用域 = system + com.heytap.tas + android | **双击电源键现在直开相机**（见 §11）；回滚：`settings put system doubletap_camera_mode 0` 或停用模块 |
+| LSPosed 模块 `io.github.doubletapcamera` | 已安装 / 已启用（`Type: modern`）/ 作用域 = system + com.heytap.tas + android + **com.oplus.camera** | **双击电源键现在直开相机**（见 §11）；回滚：`settings put system doubletap_camera_mode 0` 或停用模块 |
+| `system doubletap_camera_volkey` | 1（默认） | 锁屏态相机内「音量键=快门」兜底（§11.12）；0=不接管 |
+| `system doubletap_camera_launch_type` | 未设置（默认 `quick_launch_from_framework`） | 传给相机的 `android_camera_launch_type`（§11.12.5） |
 | `system doubletap_camera_mode` | 2（默认，= 只在 system_server 生效） | 模块模式位：0 关 / 1 钱包进程 / 2 system_server / 3 都开 |
 | `/data/local/tmp` 临时文件 | 已清理 | 诊断期留下的 DB 副本、app_process 探针等已删除（仅保留 `wallet.db.bak` 钱包库备份） |
 | 锁屏密码 | **测试用的 PIN 1234 已清除**（`locksettings clear --old 1234` → `deviceLocked=0`） | 测锁屏时临时设置，验证完已还原 |
@@ -522,7 +524,7 @@ ColorOS 自己的「相机/快捷应用」分支要求侧边指纹（本机 `per
 ⇒ 思路：**让钱包分支照常跑起来（把 wallet switch 强制为 1），但把它最后要启动的
 `OplusWalletController.startWallet(boolean)` 换成启动相机。**
 
-### 11.2 模块做了什么（两个 hook，都在 system_server）
+### 11.2 模块做了什么（三个 hook：两个在 system_server，一个在相机进程）
 1. `com.android.server.policy.OplusWalletController.getWalletSwitchState()` → 恒返回 `1`
    （否则 `PhoneWindowManagerExtImpl.sendCheckWalletMessage` 会因 "switch close" 直接放弃，钱包分支根本不触发）。
 2. `com.android.server.policy.OplusWalletController.startWallet(boolean)` → **不执行原方法**，
@@ -532,6 +534,10 @@ ColorOS 自己的「相机/快捷应用」分支要求侧边指纹（本机 `per
 
 另有可选的「钱包进程内兜底」hook（`Instrumentation.callActivityOnResume`），**默认关闭**，
 以免把正常打开钱包（刷卡/通知/QS 磁贴）也改跳相机。
+
+第三个 hook 在**相机进程**内（作用域 `com.oplus.camera`）：
+`com.oplus.camera.Camera.onKeyDown(int, KeyEvent)` —— 锁屏快捷启动模式下相机自己的音量键功能
+被 ColorOS 禁掉了（§11.12），模块在锁屏时把音量键兜底成「点快门」，解锁态完全不介入。
 
 模式开关：`adb shell settings put system doubletap_camera_mode <0|1|2|3>`
 （0=全关 / 1=只钱包进程 / **2=只 system_server（默认）** / 3=都开）。
@@ -544,7 +550,7 @@ ColorOS 自己的「相机/快捷应用」分支要求侧边指纹（本机 `per
 |---|---|
 | `META-INF/xposed/java_init.list` | 入口类全名 `io.github.doubletapcamera.HookEntry` |
 | `META-INF/xposed/module.prop` | `minApiVersion=100` / `targetApiVersion=102` / `staticScope=false` |
-| `META-INF/xposed/scope.list` | `system`（=system_server）/ `com.heytap.tas` / `android` |
+| `META-INF/xposed/scope.list` | `system`（=system_server）/ `com.heytap.tas` / `android` / `com.oplus.camera`（相机进程，§11.12 的音量键兜底） |
 | `AndroidManifest.xml` | **不要** `xposedminversion`、**不要** `xposedscope` |
 
 入口类必须 `extends io.github.libxposed.api.XposedModule`，
@@ -810,3 +816,95 @@ adb shell input keyevent 26 26      # 锁屏双击 → CapturePhotoActivity
 adb shell settings put system doubletap_camera_lock_act 0   # 还原
 ```
 实测：值=1 时锁屏双击确实进入 `com.oplus.camera/.component.CapturePhotoActivity`（已验证）。
+
+---
+
+### 11.12 锁屏态「相机内音量键功能」失效的根因与模块兜底（已实测通过 ✔）
+
+#### 11.12.1 现象
+
+锁屏（有密码）双击电源键 → 相机直接盖在锁屏上（§11.10 ✔），但**相机里的音量键功能没反应**
+（本机「音量键功能」= 快门，见 §11.11.1：相机 MMKV `pref_volume_key_function_key` = `shutter`）。
+
+#### 11.12.2 根因：ColorOS 相机的「锁屏快捷启动」模式，与启动入口无关
+
+锁屏启动相机时，相机会进入**锁屏快捷启动模式**，标志是相机自己的日志：
+
+```
+D OCAM_EventMessageUIContainerContext: setLockScreenStart: true     ← 锁屏双击启动
+D OCAM_EventMessageUIContainerContext: setLockScreenStart: false    ← 正常启动（解锁态）
+V OCAM_CameraEntry: isLockScreenStart, mAction: ..., mbSecureStartFromFramework: ..., mbShowOnKeyguardLocked: ...
+```
+
+该模式下相机**自己的音量键监听没有生效**：音量键事件其实送到了相机
+（`W OCAM_OplusCamera: Key down has been intercepted`），但没有任何快门/变焦动作
+（缺 `OCAM_CameraControlUI: onShutterButtonClick` / `OCAM_CommonCapMode: onCameraShutterButtonClick` /
+`OCAM_g1_BaseMode: CameraTest Shutter Respond Start`）。
+
+**关键实验：换启动入口没用。** 设备锁定（`deviceLocked=1`）时冷启动相机，四种入口对比：
+
+| 入口 | 结果 |
+|---|---|
+| `STILL_IMAGE_CAMERA_SECURE`（secure 相机，默认） | `setLockScreenStart: true` |
+| 普通 action `STILL_IMAGE_CAMERA` | `setLockScreenStart: true` |
+| `CapturePhotoActivity`（直拍页） | `setLockScreenStart: true` |
+| `android_camera_launch_type=spruce_double_tap_launch_from_framework` | `setLockScreenStart: true` |
+
+⇒ 这个模式由**设备是否处于锁屏**决定（相机 `onCreate` 里读 keyguard 状态：
+`Lm5/c9;->get` 会打印 `onCreate, this: ..., isKeyguardLocked: ..., isSpruceOrActionLaunch: ...`），
+不是由 Intent / extra 决定的 ⇒ **不是模块造成的，也换不掉**。
+
+补充证据：解锁态打开相机时音量键是正常的（用户实测），这与「锁屏快捷启动模式禁用音量键」一致；
+而 ADB 注入的 `input keyevent 24` 即使在解锁态也不会触发快门（注入事件与真实按键不等价），
+所以**只能用真实按键验证**。
+
+#### 11.12.3 模块兜底：第三个 hook（相机进程内）
+
+模块新增作用域 `com.oplus.camera`，在相机进程里 hook
+`com.oplus.camera.Camera.onKeyDown(int, KeyEvent)`：
+
+* 条件：音量键（`KEYCODE_VOLUME_UP/DOWN`） **且** 设备处于锁屏 **且**
+  相机自己的「音量键功能」是 `shutter`（读相机自己的 MMKV `files/mmkv/com.oplus.camera_preferences`
+  里的 `pref_volume_key_function_key`，MMKV 的字节布局是 `[keyLen][key][valLen][valType][value…]`）；
+* 动作：在相机视图树里找 `com.oplus.camera.control.MainShutterButton`（类名含 `ShutterButton`）
+  并 `performClick()` —— 走的是相机**自己的快门逻辑**，不是模拟按键。
+
+解锁态一律不接管（`KeyguardManager.isKeyguardLocked()` 为 false 直接放行），
+所以相机原生音量键行为完全不受影响。
+
+#### 11.12.4 验证（锁屏态真实链路日志）
+
+```bash
+adb shell am force-stop com.oplus.camera
+adb shell input keyevent 26            # 息屏 -> 锁屏
+adb shell input keyevent 224           # 亮屏
+adb shell "input keyevent 26 26"       # 锁屏双击 -> 相机盖在锁屏上
+adb shell input keyevent 24            # 音量↑（真实按键同理）
+adb logcat -d | grep -E "DblTapCam|Shutter"
+```
+
+实测输出（已通过）：
+
+```
+W OCAM_OplusCamera: Key down has been intercepted
+I DblTapCam: lockscreen volume key -> shutter click (com.oplus.camera.control.MainShutterButton)
+E OCAM_CameraControlUI: onShutterButtonClick, ShutterButton.id: 2131297655
+W OCAM_CommonCapMode: onCameraShutterButtonClick
+E OCAM_g1_BaseMode: CameraTest Shutter Respond Start, count: 0
+```
+
+解锁态复测：设备 `deviceLocked=0` 时按音量键，**不出现** `lockscreen volume key -> shutter`，
+只有相机自己的 `Key down has been intercepted` ⇒ 未解锁时模块不介入。
+
+#### 11.12.5 新增开关
+
+| 设置 | 值 | 说明 |
+|---|---|---|
+| `system doubletap_camera_volkey` | 0 / 1（默认 1） | 锁屏态音量键是否兜底成快门；0=完全不接管 |
+| `system doubletap_camera_launch_type` | 默认 `quick_launch_from_framework` | 传给相机的 `android_camera_launch_type`（可试 `spruce_double_tap_launch_from_framework` 等，实测都进锁屏快捷启动模式） |
+
+#### 11.12.6 已知边界
+
+* 锁屏带密码时，按下快门本身是否需要认证，取决于系统「锁屏快拍 / 免密拍照」策略；
+  本兜底只解决「音量键 = 快门」在锁屏快捷启动模式下不生效的问题。
+* 相机若把「音量键功能」改成 `zoom` / `volume`，模块不接管（只处理 `shutter`）。

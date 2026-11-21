@@ -156,6 +156,9 @@ adb shell settings put system doubletap_camera_secure   2   # 禁用 secure 入�
 
 ### 3.4.1 「锁屏后相机里的音量键功能失效」≠ 模块的问题
 
+> 结论补充：该现象的根因是 ColorOS 相机的「锁屏快捷启动」模式（与启动入口无关，
+> 见手册 §11.12）。模块已加兜底：**锁屏时音量键=快门**，解锁态不介入（见 §3.4.2）。
+
 已定位（详见 `docs/double-tap-power-wallet-hijack.md` §11.11）：
 
 * 本机相机「音量键功能」= **快门**（MMKV `pref_volume_key_function_key` = `shutter`），
@@ -174,6 +177,32 @@ bash scripts/volume-key-check.sh unlocked   # 解锁（对照组）
 若真实按键在解锁态能拍照、锁屏态不能，则是 Android 对带密码锁屏的安全策略
 （相机可显示、拍摄需认证），可试系统自带的「锁屏快拍 / 免密拍照」开关，
 或改用更轻的入口：`adb shell settings put system doubletap_camera_lock_act 1`（直拍页）。
+
+### 3.4.2 锁屏下相机的「音量键功能」也能用了（模块兜底）
+
+锁屏（含密码）双击电源键拉起相机时，ColorOS 相机会进入「锁屏快捷启动」模式
+（`OCAM_EventMessageUIContainerContext: setLockScreenStart: true`），该模式下相机自己的
+音量键功能（音量键=快门）被禁用 —— 音量键事件送到了相机，但没有触发快门。
+换启动入口（secure 相机 / 普通 action / 直拍页 / spruce 双击标记）都无效，
+它由**设备是否锁屏**决定。
+
+模块在相机进程里 hook `com.oplus.camera.Camera.onKeyDown`：锁屏时把音量键兜底成
+「点快门按钮」（`com.oplus.camera.control.MainShutterButton.performClick()`），
+解锁态完全不介入。相机里把「音量键功能」改成 zoom/volume 时模块也不接管。
+
+```bash
+adb shell settings put system doubletap_camera_volkey 0   # 不想要就关掉（默认 1=开）
+```
+
+实测日志链：
+
+```
+W OCAM_OplusCamera: Key down has been intercepted
+I DblTapCam: lockscreen volume key -> shutter click (com.oplus.camera.control.MainShutterButton)
+E OCAM_CameraControlUI: onShutterButtonClick, ShutterButton.id: 2131297655
+W OCAM_CommonCapMode: onCameraShutterButtonClick
+E OCAM_g1_BaseMode: CameraTest Shutter Respond Start
+```
 
 ### 3.5 回滚
 

@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PKG="${1:-io.github.doubletapcamera}"; shift || true
-SCOPES=("${@:-system com.heytap.tas android}")
+SCOPES=("${@:-system com.heytap.tas android com.oplus.camera}")
 read -r -a SCOPES <<< "${SCOPES[*]}"
 
 APK=$(adb shell pm path "$PKG" | sed 's/package://' | tr -d '\r')
