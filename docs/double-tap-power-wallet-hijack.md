@@ -1086,3 +1086,22 @@ adb shell "ls -lt /sdcard/DCIM/Camera/ | sed -n '2,4p'"
 > 📌 顺带加固了 `lspdb.sh`：写回 LSPosed 配置库前会检查 `modules/modules_state/scope`
 > 三张表是否存在，设备上的库被写坏时回退到本地备份 `mc.db.lastgood`，
 > 没有备份就直接中止（避免再次出现「模块静默不加载」）。
+
+### 11.14 v1.1.1 最终验证（包名改名 + scope 修复 + 连拍修复，2026-11-21 19:41）
+
+| 项 | 结果 |
+|---|---|
+| 模块包名 | `io.github.haperwu.doubletapcamera`（v1.1.0 起改名；旧包 `io.github.doubletapcamera` 需先 `adb uninstall`） |
+| `lspctl module show` | `API: min=100 target=102` / `Type: modern` / `User 0: enabled` |
+| `lspctl scope list` | `android` / `com.heytap.tas` / `com.oplus.camera` / **`system`** ← 少了 `system` 就不注入 system_server |
+| 解锁态双击 | `topResumedActivity=com.oplus.camera/.Camera`；钱包被拉起次数 **0** |
+| 锁屏（带密码）双击 | 相机盖在 keyguard 之上（`setShowWhenLocked from:false to true`），可连续拍照 |
+| 连拍 3 张 | 全部落盘（`IMG20261121194232.jpg / _01 / _02`），日志 3 次 `onFinishAddFrame, complete capture, ID: 1/2/3` |
+| 钱包 App 状态 | 包 `enabled=1`；钱包自带「双击电源键唤起快捷服务」开关 = **关闭**（根因修复保持有效） |
+| Release | <https://github.com/HaperWu/doubletapcamera/releases/download/v1.1.1/doubletap-camera.apk>（SHA-256 `6c3129a3ab3477987a326db5157e1822583bdd4b2ddb4dd29d48d31d47834353`，与 v1.0.x 同签名可覆盖升级） |
+
+> 补充经验：**LSPosed 的守护进程不一定随开机立刻起来**（本机出现过开机后 `ps` 里没有 `lspd`、
+> 打开管理器后才启动的情况）。判断模块是否注入成功，要以
+> `cat /data/adb/lspd/log/modules_*.log | tail` 里出现
+> `module loaded: process=system isSystemServer=true api=102` 为准，
+> 而不是「刚开机时双击没反应」就下结论。
