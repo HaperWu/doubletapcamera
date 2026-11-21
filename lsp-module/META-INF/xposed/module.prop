@@ -1,0 +1,9 @@
+id=doubletapcamera
+name=双击电源键直开相机
+version=1.0
+versionCode=1
+author=local
+description=把 ColorOS「双击电源键」唤起的钱包 NFC 页改为直接打开相机
+minApiVersion=100
+targetApiVersion=102
+staticScope=false

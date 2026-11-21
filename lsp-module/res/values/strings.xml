@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">双击电源键直开相机</string>
+    <string name="xposed_desc">把双击电源键的目标从「钱包」改成「相机」(OnePlus/ColorOS 16 专用)</string>
+</resources>

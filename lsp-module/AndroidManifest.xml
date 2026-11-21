@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.doubletapcamera"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="27" android:targetSdkVersion="34" />
+
+    <application
+        android:label="@string/app_name"
+        android:hasCode="true"
+        android:allowBackup="false">
+        <!-- 现代 Xposed API 模块：入口在 META-INF/xposed/java_init.list，
+             元信息在 META-INF/xposed/module.prop，作用域在 META-INF/xposed/scope.list -->
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="@string/xposed_desc" />
+    </application>
+</manifest>

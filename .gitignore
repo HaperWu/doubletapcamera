@@ -1,0 +1,33 @@
+# 构建产物与第三方工具（体积大，不入库）
+build/
+apk/
+dex/
+mmkv/
+__pycache__/
+*.pyc
+
+# 设备上抓下来的中间产物
+*.xml
+!lsp-module/**/*.xml
+*.db
+*.db-wal
+*.db-shm
+*.bin
+*.txt
+!README.md
+!docs/*.md
+wallet*.db
+mmkv*
+
+# 签名私钥（不入库；build.sh 会在缺失时用 keytool 重新生成）
+lsp-module/keystore.jks
+*.jks
+*.keystore
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# 一次性草稿脚本
+scratch/
