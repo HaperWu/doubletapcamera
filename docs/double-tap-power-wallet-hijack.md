@@ -932,3 +932,37 @@ E OCAM_g1_BaseMode: CameraTest Shutter Respond Start, count: 0
 * 锁屏带密码时，按下快门本身是否需要认证，取决于系统「锁屏快拍 / 免密拍照」策略；
   本兜底只解决「音量键 = 快门」在锁屏快捷启动模式下不生效的问题。
 * 相机若把「音量键功能」改成 `zoom` / `volume`，模块不接管（只处理 `shutter`）。
+
+#### 11.12.7 真机按键复测结果（已通过 ✔）
+
+设备端常驻抓日志后，用**真实按键**（不是 ADB 注入）压测：
+
+```bash
+adb shell su -c "logcat -v threadtime -s DblTapCam OCAM_OplusCamera OCAM_CameraControlUI \
+  OCAM_g1_BaseMode OCAM_CommonCapMode ActivityTaskManager > /data/local/tmp/vk2.log &"
+# 锁屏双击电源键 -> 相机盖在锁屏上 -> 手动按音量↑若干次
+```
+
+日志解析结果（`build/vk2.log`，877 行）：
+
+| 指标 | 数量 |
+|---|---|
+| `Key down has been intercepted`（音量键到达相机） | 14 |
+| `volume key fallback -> shutter click`（模块兜底） | 14 |
+| `onShutterButtonClick`（快门真的被点下） | 14 |
+| `volume key handled natively`（原生分支） | 0 |
+
+**14 次按键 → 14 次兜底 → 14 次快门动作，严格 1:1**：既不漏拍也不连拍 ✔
+（其中 15:03:11.706 / 15:03:11.940 相隔 234 ms 连按两次，各自对应一次快门，无叠加）。
+
+另外，锁屏双击启动相机的完整链路在真实按键下同样成立：
+
+```
+I DblTapCam: camera launched (secure/锁屏路径, locked=true)
+D ActivityTaskManager: setShowWhenLocked  from:false to true,ActivityRecord{... com.oplus.camera/.Camera t416}
+W OCAM_OplusCamera: setShowWhenLocked: true
+```
+
+> 注：本机（PKR110 / ColorOS 16 / 光学指纹）相机的**原生**音量键快门分支始终没有接管
+> （`handled natively` = 0），即锁屏快捷启动模式下音量键确实收不到快门动作 ——
+> 这正是兜底逻辑存在的意义；若将来某次升级让原生分支生效，模块会自动改为放行而不再重复点击。

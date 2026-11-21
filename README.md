@@ -186,9 +186,16 @@ bash scripts/volume-key-check.sh unlocked   # 解锁（对照组）
 换启动入口（secure 相机 / 普通 action / 直拍页 / spruce 双击标记）都无效，
 它由**设备是否锁屏**决定。
 
-模块在相机进程里 hook `com.oplus.camera.Camera.onKeyDown`：锁屏时把音量键兜底成
-「点快门按钮」（`com.oplus.camera.control.MainShutterButton.performClick()`），
-解锁态完全不介入。相机里把「音量键功能」改成 zoom/volume 时模块也不接管。
+模块在相机进程里 hook 两处：
+
+1. `com.oplus.camera.ui.control.CameraControlUI$f.d(ShutterButton, int)` —— 相机的快门入口，**计数**；
+2. `com.oplus.camera.Camera.onKeyDown(int, KeyEvent)` —— 音量键走完原生处理后，
+   若快门计数**没有增加**（说明原生分支没接管），就兜底点一次快门
+   （`com.oplus.camera.control.MainShutterButton.performClick()`）。
+
+判据是「原生有没有拍」，而不是「现在锁没锁屏」—— 相机启动时会自己 dismiss keyguard，
+用 `isKeyguardLocked()` 判断会误判（这正是第一版失效的原因）。相机里把「音量键功能」
+改成 zoom/volume 时模块不接管。
 
 ```bash
 adb shell settings put system doubletap_camera_volkey 0   # 不想要就关掉（默认 1=开）
@@ -198,11 +205,16 @@ adb shell settings put system doubletap_camera_volkey 0   # 不想要就关掉�
 
 ```
 W OCAM_OplusCamera: Key down has been intercepted
-I DblTapCam: lockscreen volume key -> shutter click (com.oplus.camera.control.MainShutterButton)
+I DblTapCam: volume key fallback -> shutter click (com.oplus.camera.control.MainShutterButton)
 E OCAM_CameraControlUI: onShutterButtonClick, ShutterButton.id: 2131297655
 W OCAM_CommonCapMode: onCameraShutterButtonClick
 E OCAM_g1_BaseMode: CameraTest Shutter Respond Start
 ```
+
+原生分支生效时则是 `I DblTapCam: volume key handled natively (shutter N -> N+1)`，且不再有 fallback。
+
+**真机按键复测（14 次按键）**：14 次 `Key down has been intercepted` → 14 次 fallback →
+14 次 `onShutterButtonClick`，严格 1:1，既不漏拍也不连拍 ✔（详见手册 §11.12.7）。
 
 ### 3.5 回滚
 
