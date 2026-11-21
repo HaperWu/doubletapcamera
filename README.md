@@ -123,7 +123,35 @@ adb logcat -d | grep -E 'DblTapCam|start wallet|STILL_IMAGE_CAMERA'
 #   期望：有 STILL_IMAGE_CAMERA 启动，且 **没有任何 'start wallet'**（钱包完全没被拉起）
 ```
 
-### 3.4 回滚
+### 3.4 锁屏（有密码）时也能直接唤起相机 ✔
+
+锁屏时相机默认会落在 keyguard 后面（必须先解锁才看得到），原因是**相机自己**在运行时
+调用 `setShowWhenLocked(false)`——它靠三个 intent extra 判断「这次启动是不是系统手势服务的正规快捷启动」：
+
+* `android_camera_launch_type` = `quick_launch_from_framework`
+* `extra_key_caller_package_name` = `com.oplus.gesture`
+* （锁屏时改用 ColorOS 的 secure 入口 `android.media.action.STILL_IMAGE_CAMERA_SECURE`）
+
+模块在锁屏时会自动切到 secure 入口并补齐这两个 extra，于是相机日志变成
+`mbSecureStartFromFramework: true` → `setShowWhenLocked: true` → **直接盖在锁屏上显示取景界面**。
+
+```bash
+# 锁屏（带密码）时双击
+adb shell "input keyevent 26 26"; sleep 3
+adb shell "dumpsys activity activities | grep topResumedActivity"
+#   期望：topResumedActivity=ActivityRecord{... com.oplus.camera/.Camera}
+adb logcat -d | grep -E 'setShowWhenLocked|mbSecureStartFromFramework'
+#   期望：setShowWhenLocked from:false to true / mbSecureStartFromFramework: true
+```
+
+其它开关（`Settings.System`）：
+
+```bash
+adb shell settings put system doubletap_camera_lock_act 1   # 锁屏时改走「直拍页」CapturePhotoActivity
+adb shell settings put system doubletap_camera_secure   2   # 禁用 secure 入口（回退普通入口）
+```
+
+### 3.5 回滚
 
 ```bash
 adb shell settings put system doubletap_camera_mode 0        # 最快，无需重启

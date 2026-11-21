@@ -492,7 +492,7 @@ adb shell am start -n com.heytap.tas/com.finshell.setting.activity.WalletSetting
 | 钱包「双击电源键唤起快捷服务」 | **关闭** | `SUPPORT_QUICK_START=false, HAS_ACTIVE_CARD=false` ⇒ 双击不再开钱包（这就是本次的修复） |
 | 钱包包 `com.heytap.tas` | enabled（已用 `pm enable` 恢复，诊断期曾被 `pm disable`） | 钱包本体可正常使用 |
 | `secure double_tap_power_button_gesture` | 0 | 设置页「相机」 |
-| `secure double_tap_power_button_gesture_enabled` | 1 | 「启用连按两次动作」总开关 |
+| `secure double_tap_power_button_gesture_enabled` | 0 | AOSP 侧「启用连按两次动作」总闸；本 ROM 的 AOSP 相机路径被特性开关关闭（§7.1），改由 LSPosed 模块接管，此值不影响模块 |
 | `secure camera_double_tap_power_gesture_disabled` | 0 | 未禁用相机 |
 | `secure double_tap_power_button_value` / `quick_app_double_power_clicked` | 已删除（null） | 诊断期临时写入 |
 | `global power_double_tap_interval` / `power_consecutive_short_tap_count` | 已删除（null） | 诊断期临时写入 |
@@ -502,6 +502,7 @@ adb shell am start -n com.heytap.tas/com.finshell.setting.activity.WalletSetting
 | LSPosed 模块 `io.github.doubletapcamera` | 已安装 / 已启用（`Type: modern`）/ 作用域 = system + com.heytap.tas + android | **双击电源键现在直开相机**（见 §11）；回滚：`settings put system doubletap_camera_mode 0` 或停用模块 |
 | `system doubletap_camera_mode` | 2（默认，= 只在 system_server 生效） | 模块模式位：0 关 / 1 钱包进程 / 2 system_server / 3 都开 |
 | `/data/local/tmp` 临时文件 | 已清理 | 诊断期留下的 DB 副本、app_process 探针等已删除（仅保留 `wallet.db.bak` 钱包库备份） |
+| 锁屏密码 | **测试用的 PIN 1234 已清除**（`locksettings clear --old 1234` → `deviceLocked=0`） | 测锁屏时临时设置，验证完已还原 |
 
 > 备注：本机 `logd`/`logcat` 曾是 0 字节残桩（`init.svc.logd=stopped`），所有早期验证都改用
 > `dumpsys` / `settings` / `content query` / `uiautomator` 的状态式取证；
@@ -691,4 +692,37 @@ bash scripts/lockvariants.sh  # 锁屏下逐个试探 5 种 Intent 写法，看�
 **已知边界**：即便相机盖在锁屏上，**按下快门拍照仍可能要求先解锁**——这是 Android 对带密码锁屏的安全策略
 （相机可以显示，但拍摄动作需要认证）。若手机支持「锁屏快拍」且要求输入密码，可配合系统的
 「锁屏下不输入密码即可拍照」开关使用。
+
+### 11.10 锁屏验证结果（已实测通过 ✔）
+
+测试条件：临时 `locksettings set-pin 1234`（测完已 `locksettings clear --old 1234` 清除），
+设备锁屏 → 双击电源键 → 关键日志链：
+
+```
+DblTapCam: startWallet intercepted -> camera (ctx=true)
+START u0 {act=android.media.action.STILL_IMAGE_CAMERA_SECURE flg=0x10000000 cmp=com.oplus.camera/.Camera}
+DblTapCam: camera launched (secure/锁屏路径, locked=true)
+W OCAM_OplusCamera: setShowWhenLocked: true              ← 相机不再关闭锁屏显示
+D ActivityTaskManager: setShowWhenLocked from:false to true
+OCAM_CameraEntry: parseIntent, mCameraEntryType: 1, mCallPkg: com.oplus.gesture,
+                  mAction: android.media.action.STILL_IMAGE_CAMERA_SECURE
+OCAM_CameraEntry: isLockScreenStart, ... mbSecureStartFromFramework: true,
+                  mbShowOnKeyguardLocked: false, isDeviceLocked: true
+```
+
+关键点：`mbSecureStartFromFramework` 由 **false 翻成 true**，正是靠补上的
+`android_camera_launch_type=quick_launch_from_framework` +
+`extra_key_caller_package_name=com.oplus.gesture` 这两个 extra；
+相机随之调用 `setShowWhenLocked(true)`，于是**直接盖在 keyguard 之上**。
+
+实测结论：
+* 锁屏（带密码）双击电源键 → `topResumedActivity=ActivityRecord{… com.oplus.camera/.Camera}`，
+  `mKeyguardOccluded=true`、`deviceLocked=1`，屏幕直接显示**相机取景界面**（专业/视频/照片/人像/更多 + 快门），
+  **不再需要先解锁**（截图见 `build/locktest.png`）。
+* 解锁态双击 → 同样直接进相机（普通 action `STILL_IMAGE_CAMERA`，flg=0x34000000）。
+* 两种状态下钱包都**一次都没有被拉起**（logcat 里 `start wallet` 计数 = 0）。
+
+> 复测时注意：模块的 `getWalletSwitchState -> force 1` 会让框架**无视钱包开关的去向**，
+> 始终走 `startWallet()` → 被我们改写成启动相机。
+> 也就是说：**模块生效与「钱包自带开关」是否关闭无关**，两条链路互不依赖。
 
