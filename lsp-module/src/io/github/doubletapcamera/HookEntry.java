@@ -37,12 +37,16 @@ public class HookEntry extends XposedModule {
     private static final String TAG = "DblTapCam";
     private static final String CFG = "doubletap_camera_mode";
     private static final String CFG_SECURE = "doubletap_camera_secure";
+    /** 锁屏时用哪个相机入口：0=默认(secure 相机) 1=CapturePhotoActivity 直拍 2=普通相机 */
+    private static final String CFG_LOCK_ACT = "doubletap_camera_lock_act";
 
     private static final String CAMERA_PKG = "com.oplus.camera";
     private static final String CAMERA_ACTION = "android.media.action.STILL_IMAGE_CAMERA";
     /** 厂商自己的「安全相机」入口：可在锁屏之上唤起（锁屏快拍） */
     private static final String CAMERA_SECURE_ACTION = "android.media.action.STILL_IMAGE_CAMERA_SECURE";
     private static final String CAMERA_SECURE_COMPONENT = "com.oplus.camera.Camera";
+    /** 相机里 showWhenLocked + turnScreenOn 都为 true 的「直拍」页（AOSP IMAGE_CAPTURE 的落地页） */
+    private static final String CAMERA_CAPTURE_COMPONENT = "com.oplus.camera.component.CapturePhotoActivity";
 
     /** 钱包里可能被「双击电源键」拉起的 Activity */
     private static final Set<String> WALLET_ACTIVITIES = new HashSet<>(Arrays.asList(
@@ -214,6 +218,23 @@ public class HookEntry extends XposedModule {
         int secureMode = secureMode(ctx);          // 0=自动 1=强制 2=禁用
         boolean locked = isKeyguardLocked(ctx);
         if (secureMode == 1 || (secureMode == 0 && locked)) {
+            // 锁屏：优先用「直拍」页（showWhenLocked + turnScreenOn），其次 secure 相机
+            int lockAct = lockAct(ctx);
+            if (lockAct == 1) {
+                try {
+                    Intent ci = new Intent("android.media.action.IMAGE_CAPTURE");
+                    ci.setPackage(CAMERA_PKG);
+                    ci.setComponent(new ComponentName(CAMERA_PKG, CAMERA_CAPTURE_COMPONENT));
+                    ci.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ci.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+                    ci.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
+                    ctx.startActivity(ci);
+                    android.util.Log.i(TAG, "camera launched (capture/锁屏直拍, locked=" + locked + ")");
+                    return;
+                } catch (Throwable t) {
+                    android.util.Log.i(TAG, "capture camera launch failed: " + t + " -> fallback");
+                }
+            }
             try {
                 Intent si = new Intent();
                 si.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -222,6 +243,12 @@ public class HookEntry extends XposedModule {
                 si.putExtra("lunch_type", 2);
                 si.setAction(CAMERA_SECURE_ACTION);
                 si.setComponent(new ComponentName(CAMERA_PKG, CAMERA_SECURE_COMPONENT));
+                // 相机（com.oplus.camera.CameraManager）靠这两个 extra 判断「是不是系统/手势服务的
+                // 正规快捷启动」，从而决定锁屏时是否允许盖在 keyguard 之上：
+                //   android_camera_launch_type  = quick_launch_from_framework
+                //   extra_key_caller_package_name = com.oplus.gesture
+                si.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+                si.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
                 ctx.startActivity(si);
                 android.util.Log.i(TAG, "camera launched (secure/锁屏路径, locked=" + locked + ")");
                 return;
@@ -235,6 +262,8 @@ public class HookEntry extends XposedModule {
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         i.putExtra("need_screen_on", true);
+        i.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+        i.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
         ctx.startActivity(i);
         android.util.Log.i(TAG, "camera launched (normal, locked=" + locked + ")");
     }
@@ -256,6 +285,18 @@ public class HookEntry extends XposedModule {
         }
         try {
             return Settings.System.getInt(ctx.getContentResolver(), CFG_SECURE, 0);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** Settings.System "doubletap_camera_lock_act"：锁屏时用哪个入口 0=secure 相机 1=直拍页 2=普通相机 */
+    private static int lockAct(Context ctx) {
+        if (ctx == null) {
+            return 0;
+        }
+        try {
+            return Settings.System.getInt(ctx.getContentResolver(), CFG_LOCK_ACT, 0);
         } catch (Throwable t) {
             return 0;
         }

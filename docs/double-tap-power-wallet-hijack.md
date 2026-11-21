@@ -616,16 +616,33 @@ adb uninstall io.github.doubletapcamera
 ### 11.9 锁屏有密码时相机拉不起来（keyguard 问题）
 
 **现象**：亮屏/解锁状态下双击电源键能直接进相机；**锁屏且设了密码时，相机被启动但落在锁屏后面，
-必须先解锁才看得到**。
+必须先解锁才看得到**（相机 task 起来约 0.1s 后被 CLOSE）。
 
-**原因**：模块原本用的是普通 action
-`android.media.action.STILL_IMAGE_CAMERA`（+ `package com.oplus.camera`）。
-普通入口的相机 Activity **没有 `android:showWhenLocked`**（ColorOS 相机的锁屏快拍用的是另一套「安全相机」入口），
-所以系统把它放在 keyguard 之后。钱包的 NFC 页之所以能盖在锁屏上，是因为它的 3 个 activity
-在 manifest 里声明了 `android:showWhenLocked="true"`。
+**定位过程（三层）**：
 
-**修法**：锁屏时改用 ColorOS 自己的「安全相机」入口。把它从厂商代码里反出来
-（`com.android.server.policy.PhoneWindowManagerExtImpl.startCamera`，反汇编结果）：
+1. **manifest 层**：`com.oplus.camera.Camera` 其实**声明了** `android:showWhenLocked=true`
+   （`aapt2 dump xmltree --file AndroidManifest.xml apk/OplusCamera.apk` 可见），所以并不是「相机没有锁屏能力」。
+   真正把它关掉的是相机自己：运行时日志
+   `W OCAM_OplusCamera: setShowWhenLocked: false` +
+   `D ActivityTaskManager: setShowWhenLocked from:false to false,ActivityRecord{... com.oplus.camera/.Camera}`
+   ⇒ **门禁在相机进程内部**，由相机根据「这次启动是谁发起的」决定。
+2. **相机进程的反编译取证**（`com.oplus.camera.CameraManager.F1`、`com.oplus.camera.entry.CameraEntry.d`）：
+   相机会读三个 intent extra 来判断启动来源
+   * `android_camera_launch_type`（String）——与 `'quick_launch_from_framework'` 比较；
+   * `extra_key_caller_package_name`（String）——与 `'com.oplus.gesture'` 比较；
+   * `com.android.systemui.camera_launch_source`（SystemUI 磁贴路径）。
+
+   启动来源枚举（`CameraEntry.d(String)`）：`gimbal_launch_from_framework`、
+   `quick_launch_from_framework`、`quick_launch_from_smart_button`、`watch_launch_from_framework`、
+   `spruce_double_tap_launch_from_framework`、`action_button_launch_from_framework`。
+
+   相机自己打的判定日志：`isLockScreenStart, mAction: …, mbSecureStartFromFramework: …,
+   mbShowOnKeyguardLocked: …, isDeviceLocked: …`
+   ⇒ 我们用 secure 入口启动时，`mbSecureStartFromFramework=false`、`mbShowOnKeyguardLocked=false`，
+   所以相机主动 `setShowWhenLocked(false)`。
+3. **厂商对照**：ColorOS 侧边键拉相机 `com.android.server.policy.OplusSmartButtonController.startCamera`
+   正是「锁屏时用 `STILL_IMAGE_CAMERA_SECURE`，并 `putExtra("android_camera_launch_type", …)`」，
+   而 `PhoneWindowManagerExtImpl.startCamera`（厂商「安全相机」入口）反汇编如下：
 
 ```java
 Intent i = new Intent();
@@ -638,16 +655,28 @@ i.setComponent(new ComponentName("com.oplus.camera", "com.oplus.camera.Camera"))
 context.startActivityAsUser(i, userId);
 ```
 
-模块现在的策略（`HookEntry.startCamera`）：
+**模块的修法**（`HookEntry.startCamera`）：
 
-| 情况 | 启动方式 |
-|---|---|
-| 锁屏（`KeyguardManager.isKeyguardLocked()` = true） | 先用上面的 **secure 入口**；失败则回退普通入口 |
-| 未锁屏 | 普通入口（`STILL_IMAGE_CAMERA` + `need_screen_on=true`） |
-| 强制 | `adb shell settings put system doubletap_camera_secure 1`（一直用 secure）/ `2`（禁用） |
+* 锁屏时走 secure 入口，并**补上相机认识的两个 extra**，让相机认定「这是系统手势服务的正规快捷启动」：
+  ```java
+  si.putExtra("android_camera_launch_type", "quick_launch_from_framework");
+  si.putExtra("extra_key_caller_package_name", "com.oplus.gesture");
+  ```
+* 新增第三个开关 `doubletap_camera_lock_act`（`Settings.System`），用于在「secure 相机」与
+  「直拍页」之间 A/B 测试：
+  | 值 | 锁屏时的入口 |
+  |---|---|
+  | 0（默认） | `com.oplus.camera.Camera` + `STILL_IMAGE_CAMERA_SECURE`（+ 上面两个 extra） |
+  | 1 | `com.oplus.camera.component.CapturePhotoActivity` + `IMAGE_CAPTURE`（该页 manifest 是 showWhenLocked+turnScreenOn） |
+  | 2 | 普通入口 `STILL_IMAGE_CAMERA` |
 
-对应源码里的 `CAMERA_SECURE_ACTION = "android.media.action.STILL_IMAGE_CAMERA_SECURE"`、
-`CAMERA_SECURE_COMPONENT = "com.oplus.camera.Camera"`。
+* 其它开关：`doubletap_camera_secure`（0=自动 1=强制 secure 2=禁用）、
+  `doubletap_camera_mode`（0=全关 1=钱包进程 2=system_server（默认） 3=都开）。
+
+```bash
+adb shell settings put system doubletap_camera_lock_act 1   # 切到「直拍页」
+adb shell settings put system doubletap_camera_lock_act 0   # 切回 secure 相机
+```
 
 **验证脚本**（仓库内）：
 ```bash
@@ -656,6 +685,8 @@ bash scripts/lockvariants.sh  # 锁屏下逐个试探 5 种 Intent 写法，看�
 ```
 > 注意：注入双击必须用**同一个 input 进程**连发两次：`adb shell "input keyevent 26 26"`；
 > 分两次 `adb shell` 的间隔会超过 `multi_press_timeout`(300ms)，判定不成立。
+> 另外相机是否肯盖在锁屏上，看日志里 `isLockScreenStart … mbShowOnKeyguardLocked: true` 与
+> `ActivityTaskManager: setShowWhenLocked from:false to true`。
 
 **已知边界**：即便相机盖在锁屏上，**按下快门拍照仍可能要求先解锁**——这是 Android 对带密码锁屏的安全策略
 （相机可以显示，但拍摄动作需要认证）。若手机支持「锁屏快拍」且要求输入密码，可配合系统的
