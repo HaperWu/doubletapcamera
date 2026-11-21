@@ -7,6 +7,9 @@
 > 现象：双击电源键 → 弹出「钱包 / NFC 刷卡页」，而不是相机。
 
 **Releases**：<https://github.com/HaperWu/doubletapcamera/releases> （`doubletap-camera.apk` 为已签名可用包）
+**最新**：<https://github.com/HaperWu/doubletapcamera/releases/download/v1.0.2/doubletap-camera.apk>
+（v1.0.2 的 APK 与 v1.0.1 **逐字节一致**：SHA-256 `f6f018037720f95b34ef6f7e5b4c30701ab26ad2b9861c972a6838c690807542`，
+同签名可直接覆盖升级；本次只补了「锁屏后相机音量键失效」的定位结论与验证脚本）
 **包名**：`io.github.doubletapcamera`
 
 ---
