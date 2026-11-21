@@ -25,6 +25,8 @@ jobs:
 
       - name: Build module APK
         working-directory: lsp-module
+        env:
+          MODULE_KEYSTORE_B64: ${{ secrets.MODULE_KEYSTORE_B64 }}
         run: ./build.sh
 
       - name: Show package info
@@ -58,4 +60,4 @@ jobs:
           tag=$(date +%Y%m%d-%H%M%S)
           gh release create "$tag" dist/doubletap-camera.apk \
             --title "doubletap-camera $tag" \
-            --notes "自动构建（签名由 CI 临时 keystore 生成，与 v1.0.0 发布的签名不同，升级前请先卸载旧版）"
+            --notes "自动构建（签名密钥取自仓库 Secret \`MODULE_KEYSTORE_B64\`，与 v1.1.0+ 正式版同签名，可直接覆盖升级）"

@@ -1,9 +1,9 @@
-id=doubletapcamera
+id=io.github.haperwu.doubletapcamera
 name=双击电源键直开相机
-version=1.0
-versionCode=1
-author=local
-description=把 ColorOS「双击电源键」唤起的钱包 NFC 页改为直接打开相机
+version=1.1.0
+versionCode=2
+author=HaperWu
+description=把 ColorOS / 一加 上「双击电源键」的默认目标从「钱包」改成「相机」；锁屏也能直开相机，并兜底修复锁屏下音量键快门失效
 minApiVersion=100
 targetApiVersion=102
 staticScope=false

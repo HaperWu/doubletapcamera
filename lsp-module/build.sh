@@ -64,9 +64,15 @@ zout.close(); zin.close()
 PY
 
 if [ ! -f keystore.jks ]; then
-  keytool -genkeypair -keystore keystore.jks -alias mod -keyalg RSA -keysize 2048 \
-    -validity 10000 -storepass android -keypass android \
-    -dname "CN=DblTapCam, OU=dev, O=local, C=CN" >/dev/null 2>&1
+  if [ -n "${MODULE_KEYSTORE_B64:-}" ]; then
+    # 仓库 Secret 里保存了正式签名密钥（base64），CI 与本地用同一把钥匙 → 跨版本可直接覆盖升级
+    echo "==> 从 MODULE_KEYSTORE_B64 恢复签名密钥"
+    printf '%s' "$MODULE_KEYSTORE_B64" | base64 -d > keystore.jks
+  else
+    keytool -genkeypair -keystore keystore.jks -alias mod -keyalg RSA -keysize 2048 \
+      -validity 10000 -storepass android -keypass android \
+      -dname "CN=DblTapCam, OU=dev, O=local, C=CN" >/dev/null 2>&1
+  fi
 fi
 "$BT/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 "$BT/apksigner" sign --ks keystore.jks --ks-pass pass:android --key-pass pass:android \

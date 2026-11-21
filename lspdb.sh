@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PKG="${1:-io.github.doubletapcamera}"; shift || true
+PKG="${1:-io.github.haperwu.doubletapcamera}"; shift || true
 SCOPES=("${@:-system com.heytap.tas android com.oplus.camera}")
 read -r -a SCOPES <<< "${SCOPES[*]}"
 
