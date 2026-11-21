@@ -1,0 +1,61 @@
+name: build-apk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lsp-module/**'
+      - 'tools/fetch-build-deps.sh'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch offline build deps (ecj / android.jar / build-tools r34)
+        run: ./tools/fetch-build-deps.sh
+
+      - name: Build module APK
+        working-directory: lsp-module
+        run: ./build.sh
+
+      - name: Show package info
+        run: |
+          build/dl/bt/android-14/aapt2 dump badging build/out/doubletap-camera.apk | head -3
+          build/dl/bt/android-14/apksigner verify --print-certs build/out/doubletap-camera.apk | head -3
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: doubletap-camera-apk
+          path: build/out/doubletap-camera.apk
+
+  # 需要 GitHub Token 才能推 release；未配置时跳过
+  release:
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: doubletap-camera-apk
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(date +%Y%m%d-%H%M%S)
+          gh release create "$tag" dist/doubletap-camera.apk \
+            --title "doubletap-camera $tag" \
+            --notes "自动构建（签名由 CI 临时 keystore 生成，与 v1.0.0 发布的签名不同，升级前请先卸载旧版）"

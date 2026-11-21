@@ -6,6 +6,9 @@
 > 实测机型：**一加 Ace 5 Pro（PKR110，ColorOS 16 / Android 16，SDK 36）**
 > 现象：双击电源键 → 弹出「钱包 / NFC 刷卡页」，而不是相机。
 
+**Releases**：<https://github.com/HaperWu/doubletapcamera/releases> （`doubletap-camera.apk` 为已签名可用包）
+**包名**：`io.github.doubletapcamera`
+
 ---
 
 ## 1. 这个仓库解决什么问题
@@ -163,6 +166,15 @@ scripts/                         设备侧复现与判定脚本
 实现 `onSystemServerStarting(SystemServerStartingParam)` 与 `onPackageLoaded(PackageLoadedParam)`。
 
 ### 4.2 离线构建（宿主机只有 JRE、没有 Android SDK）
+
+```bash
+./tools/fetch-build-deps.sh     # 下载 ecj / android.jar / build-tools r34（之后全程离线）
+cd lsp-module && ./build.sh     # 产物 build/out/doubletap-camera.apk
+```
+
+GitHub Actions 里已经内置同样的流程（`.github/workflows/build-apk.yml`）：
+push 到 `main` 会自动构建并产出 APK artifact 与 release。
+> CI 用临时 keystore 签名，**与 Releases 里手工发布的签名不同**，跨版本升级前请先卸载旧版。
 
 * 编译器：`org.eclipse.jdt:ecj`（Maven Central 有 `.jar`，`java -jar` 直接跑）；
 * D8：只能从 build-tools 里取（`build-tools_r34/lib/d8.jar`），
