@@ -32,11 +32,23 @@ for f in "" "-wal" "-shm"; do
 done
 
 python3 - "$TMP/mc.db" "$PKG" "$APK" "${SCOPES[@]}" <<'PY'
-import sqlite3, sys
+import sqlite3, sys, shutil, os
 db, pkg, apk = sys.argv[1], sys.argv[2], sys.argv[3]
 scopes = sys.argv[4:]
 c = sqlite3.connect(db)
 c.execute("PRAGMA journal_mode=WAL")
+# 完整性检查：LSPosed 的库若被写坏（曾出现「一张表都没有」），写回会导致模块彻底不加载
+tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
+need = {"modules", "modules_state", "scope"}
+if not need <= tables:
+    bak = os.path.join(os.path.dirname(db), "mc.db.lastgood")
+    if os.path.exists(bak):
+        shutil.copy(bak, db)
+        c = sqlite3.connect(db)
+        tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
+        print("!! 设备上的库缺表，已回退到本地备份 mc.db.lastgood")
+    else:
+        raise SystemExit(f"!! 设备上的 LSPosed 配置库异常（缺 {need - tables}），且无本地备份，已中止（不写回）")
 # 清理旧包名残留（改包名/换模块时用）
 for tbl in ("modules", "modules_state", "scope"):
     c.execute(f"DELETE FROM {tbl} WHERE module_pkg_name<>?", (pkg,))
@@ -50,6 +62,7 @@ print("modules:", list(c.execute("select * from modules")))
 print("state  :", list(c.execute("select * from modules_state")))
 print("scope  :", list(c.execute("select * from scope")))
 c.close()
+shutil.copy(db, os.path.join(os.path.dirname(db), "mc.db.lastgood"))
 PY
 
 adb push "$TMP/mc.db" /data/local/tmp/mc_new.db >/dev/null

@@ -428,9 +428,11 @@ public class HookEntry extends XposedModule {
      * com.android.server.policy.PhoneWindowManagerExtImpl.startCamera）：
      *   action    = android.media.action.STILL_IMAGE_CAMERA_SECURE
      *   component = com.oplus.camera.Camera
-     *   extras    = caller_package=android / mode=29 / lunch_type=2
      *   flags     = FLAG_ACTIVITY_NEW_TASK
      * 走这个入口相机才能盖在锁屏上（锁屏快拍）。
+     *
+     * 注意：厂商那段代码还带 mode=29 / lunch_type=2 两个 extra，但**不能照抄**——
+     * 见下面 startCamera 里的注释（带上这两个 extra 会导致拍照管线异常、只能拍一张）。
      */
     private static void startCamera(Context ctx) {
         if (ctx == null) {
@@ -459,9 +461,13 @@ public class HookEntry extends XposedModule {
             try {
                 Intent si = new Intent();
                 si.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                // 只带 caller_package；**不要**再带 mode=29 / lunch_type=2：
+                // 这两个 extra 是厂商「安全相机」专用参数，一旦带上，ColorOS 相机会把
+                // 拍照管线切到受限模式（capture 请求发出去但收不到回帧，
+                // 日志 OCAM_g1_BaseMode: capture, failed to send request /
+                // OCAM_AutoLogHelper: tryCatchCaptureFailedLog, reason: CF_FOREGROUND_CAPTURE），
+                // 结果「按快门不出图、只能拍一张」。实测去掉后照片正常落盘。
                 si.putExtra("caller_package", "android");
-                si.putExtra("mode", 29);
-                si.putExtra("lunch_type", 2);
                 si.setAction(CAMERA_SECURE_ACTION);
                 si.setComponent(new ComponentName(CAMERA_PKG, CAMERA_SECURE_COMPONENT));
                 // 相机（com.oplus.camera.CameraManager）靠这两个 extra 判断「是不是系统/手势服务的

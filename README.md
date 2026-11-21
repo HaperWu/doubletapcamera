@@ -7,9 +7,9 @@
 > 现象：双击电源键 → 弹出「钱包 / NFC 刷卡页」，而不是相机。
 
 **Releases**：<https://github.com/HaperWu/doubletapcamera/releases> （`doubletap-camera.apk` 为已签名可用包）
-**最新**：<https://github.com/HaperWu/doubletapcamera/releases/download/v1.0.2/doubletap-camera.apk>
-（v1.0.2 的 APK 与 v1.0.1 **逐字节一致**：SHA-256 `f6f018037720f95b34ef6f7e5b4c30701ab26ad2b9861c972a6838c690807542`，
-同签名可直接覆盖升级；本次只补了「锁屏后相机音量键失效」的定位结论与验证脚本）
+**最新**：<https://github.com/HaperWu/doubletapcamera/releases/download/v1.0.3/doubletap-camera.apk>
+（v1.0.3 的 APK SHA-256 `7716da68f0d87d6eb1961e4e5a93de50645856c70dd83facdac1809422a00f47`，
+同签名可直接覆盖升级；本次修掉了「锁屏双击打开的相机只能拍一张照片」——见 §3.4.3）
 **包名**：`io.github.doubletapcamera`
 
 ---
@@ -215,6 +215,43 @@ E OCAM_g1_BaseMode: CameraTest Shutter Respond Start
 
 **真机按键复测（14 次按键）**：14 次 `Key down has been intercepted` → 14 次 fallback →
 14 次 `onShutterButtonClick`，严格 1:1，既不漏拍也不连拍 ✔（详见手册 §11.12.7）。
+
+### 3.4.3 「锁屏双击打开的相机只能拍一张照片」= 启动参数带错了 ✔（v1.0.3 修复）
+
+现象：锁屏双击拉起的相机，按快门/音量键**不出图**，连按第二下就
+`capture, failed to send request`；解锁后正常启动相机则一切正常。
+
+根因：模块最初照抄了厂商「安全相机」入口
+（`PhoneWindowManagerExtImpl.startCamera`）的两个业务 extra：
+
+```java
+i.putExtra("mode", 29);        // ← 元凶
+i.putExtra("lunch_type", 2);   // ← 元凶
+```
+
+带上它们，ColorOS 相机会把拍照管线切到受限模式
+（`tryCatchCaptureFailedLog, reason: CF_FOREGROUND_CAPTURE`、
+`onAddPreviewFrameBuffFail` 刷屏），表现就是「快门有反应但不出图、只能拍一张」。
+把 extra 逐个二分后确认：只有这两个 extra 有害，
+`caller_package=android`、`android_camera_launch_type`、`extra_key_caller_package_name` 都无害
+（后两个还必须留着，否则相机不会盖在锁屏上）。
+
+v1.0.3 起模块**不再**发送 `mode` / `lunch_type`。
+
+验证（锁屏 → 双击 → 连点 3 下快门）：
+
+```bash
+adb shell "input keyevent 26 26"; sleep 6
+adb shell input tap 540 2061; sleep 3
+adb shell input tap 540 2061; sleep 3
+adb shell input tap 540 2061; sleep 3
+adb shell "ls -lt /sdcard/DCIM/Camera/ | sed -n '2,4p'"
+# 期望：3 个新文件 + 日志里 3 次 OCAM_CaptureProcessor: onFinishAddFrame, complete capture, ID: n
+```
+
+实测（本机带密码锁屏）：相机仍盖在 keyguard 之上
+（`setShowWhenLocked from:true to true` + `mbShowOnKeyguardLocked: true` + `isKeyguardShowing=true`），
+且 3 连拍全部落盘 ✔（详见手册 §11.13）。
 
 ### 3.5 回滚
 

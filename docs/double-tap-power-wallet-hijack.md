@@ -966,3 +966,113 @@ W OCAM_OplusCamera: setShowWhenLocked: true
 > 注：本机（PKR110 / ColorOS 16 / 光学指纹）相机的**原生**音量键快门分支始终没有接管
 > （`handled natively` = 0），即锁屏快捷启动模式下音量键确实收不到快门动作 ——
 > 这正是兜底逻辑存在的意义；若将来某次升级让原生分支生效，模块会自动改为放行而不再重复点击。
+
+---
+
+### 11.13 「锁屏双击打开的相机只能拍一张照片」的根因与修复（已定位 ✔）
+
+#### 11.13.1 现象
+
+锁屏双击电源键拉起的相机：按快门 / 音量键，**第一张出不来或出不来第二张**，
+`/sdcard/DCIM/Camera/` 里没有新文件；连按第二下时相机直接报
+`capture, failed to send request`。
+
+#### 11.13.2 先排除「不是模块的锅」
+
+| 对照实验 | 结论 |
+|---|---|
+| 模块兜底链路日志齐全（`volume key fallback -> shutter click` → `onShutterButtonClick`） | 事件与快门动作都正常触发 |
+| 用 uiautomator 找到 `content-desc="快门"`（bounds `[423,1944][657,2178]`）**直接点屏幕快门** | **同样不出图** ⇒ 与音量键兜底无关，是相机自身没完成拍照 |
+| 解锁后用普通入口启动相机再点快门 | **正常出图**（`IMG2026xxxx.jpg` + `onFinishAddFrame, complete capture, ID: 1`）⇒ 相机硬件/HAL 没问题 |
+| 解锁后用 `_SECURE` action 启动相机再点快门 | **正常出图** ⇒ 与 `_SECURE` action 本身无关 |
+
+⇒ 变量只剩「**启动时设备处于锁屏**」这一个。
+
+#### 11.13.3 根因：厂商「安全相机」的两个 extra
+
+模块最初照抄了厂商 `com.android.server.policy.PhoneWindowManagerExtImpl.startCamera`
+（ColorOS 自己拉「安全相机」的入口）的完整参数：
+
+```java
+i.putExtra("caller_package", "android");
+i.putExtra("mode", 29);          // ← 元凶之一
+i.putExtra("lunch_type", 2);     // ← 元凶之一
+i.setAction("android.media.action.STILL_IMAGE_CAMERA_SECURE");
+```
+
+把 extra 逐个做二分（锁屏下启动 → 点一次快门 → 看有没有 `complete capture` + 文件）：
+
+| 启动参数（都带 `android_camera_launch_type=quick_launch_from_framework`） | 拍照完成 | 出图 |
+|---|---|---|
+| 仅 `action=_SECURE` | ✅ `complete capture, ID: 1` | ✅ |
+| `+ caller_package=android` | ✅ | ✅ |
+| `+ extra_key_caller_package_name=com.oplus.gesture` | ✅ | ✅ |
+| **`+ mode=29`** | ❌ `capture, failed to send request` | ❌ |
+| **`+ lunch_type=2`** | ❌ `capture, failed to send request` | ❌ |
+| `+ mode=29 + lunch_type=2`（= 修复前的模块） | ❌ | ❌ |
+
+**结论**：`mode=29` / `lunch_type=2` 是厂商「安全相机」专用参数，带上后 ColorOS 相机会把拍照
+管线切到受限模式（`OCAM_CaptureProcessor: isReadyToCapture, foreground capture: 1`、
+`OCAM_AutoLogHelper: tryCatchCaptureFailedLog, reason: CF_FOREGROUND_CAPTURE`、
+`CameraUnit, ApsProcessor: onAddPreviewFrameBuffFail` 刷屏），
+表现就是「快门响应了但不出图 / 只能拍一张」。
+
+> 这两个 extra 是「谁在拉相机 + 以什么业务模式拉」的业务参数，相机侧会据此走
+> 「由系统代拍/受限」的分支；我们只是模拟系统手势，并不具备那条业务链路，
+> 所以带了反而把相机推进去死胡同。
+
+#### 11.13.4 修复
+
+模块的 secure 启动路径**去掉 `mode` 与 `lunch_type`**，只保留：
+
+```
+action                        = android.media.action.STILL_IMAGE_CAMERA_SECURE
+component                     = com.oplus.camera/.Camera
+caller_package                = android
+android_camera_launch_type    = quick_launch_from_framework
+extra_key_caller_package_name = com.oplus.gesture
+flags                         = FLAG_ACTIVITY_NEW_TASK
+```
+
+这三个 key（`android_camera_launch_type` + `extra_key_caller_package_name`）必须留着 ——
+相机靠它们判断「是不是系统/手势服务的正规快捷启动」，
+从而在锁屏时调用 `setShowWhenLocked(true)` 把相机盖在 keyguard 之上
+（去掉后相机会落在锁屏后面，必须先解锁才能看到）。
+
+#### 11.13.5 验证
+
+```bash
+# 锁屏 → 双击电源键 → 相机盖在锁屏上 → 连点 3 下快门
+adb shell "input keyevent 26 26"; sleep 6
+adb shell input tap 540 2061; sleep 3
+adb shell input tap 540 2061; sleep 3
+adb shell input tap 540 2061; sleep 3
+adb shell "ls -lt /sdcard/DCIM/Camera/ | sed -n '2,4p'"
+
+# 期望：3 个新文件 + 日志里 3 次
+#   OCAM_CaptureProcessor: onFinishAddFrame, complete capture, ID: n
+#   （不再出现 capture, failed to send request）
+```
+
+> ⚠️ 注入的音量键不会触发快门（见 §11.11.3），验证拍照请**点屏幕快门**或用真机音量键。
+
+#### 11.13.6 实测验证结果（已通过 ✔）
+
+修复后（模块 v1.0.3，APK SHA-256 `7716da68f0d87d6eb1961e4e5a93de50645856c70dd83facdac1809422a00f47`）：
+
+| 场景 | 结果 |
+|---|---|
+| 锁屏双击 → 相机 | ✔ `topResumedActivity=ActivityRecord{... com.oplus.camera/.Camera}` |
+| 锁屏连点 3 下快门 | ✔ **3 张照片全部落盘**（`IMG20261121191837/1841/1844.jpg`），日志 3 次 `onFinishAddFrame, complete capture, ID: 1/2/3` |
+| **带密码锁屏**（`locksettings set-pin 1234`）双击 | ✔ 相机仍盖在 keyguard 之上：`setShowWhenLocked from:true to true` + `mbShowOnKeyguardLocked: true` + `isKeyguardShowing=true`，且照片正常落盘（`IMG20261121191923.jpg` + `complete capture, ID: 1`） |
+| 锁屏态音量键（快门功能） | ✔ 模块兜底仍生效：`volume key fallback -> shutter click` → `onShutterButtonClick` |
+| 解锁态双击 | ✔ `com.oplus.camera/.component.CameraImageActivity` |
+| 钱包是否被拉起 | ✔ 全程 0 次（`grep -c "start wallet"` = 0） |
+
+> ⚠️ 本次修复**没有**改变「谁先谁后」：模块仍然强制 `getWalletSwitchState()=1`，
+> 让 ColorOS 走到 `startWallet()`，再把这次启动改写成相机；
+> 钱包自身的「双击电源键唤起快捷服务」开关保持关闭（provider 报 `SUPPORT_QUICK_START=false`）。
+
+> 📌 顺带加固了 `lspdb.sh`：写回 LSPosed 配置库前会检查 `modules/modules_state/scope`
+> 三张表是否存在，设备上的库被写坏时回退到本地备份 `mc.db.lastgood`，
+> 没有备份就直接中止（避免再次出现「模块静默不加载」）。
