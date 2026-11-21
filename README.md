@@ -151,6 +151,27 @@ adb shell settings put system doubletap_camera_lock_act 1   # 锁屏时改走「
 adb shell settings put system doubletap_camera_secure   2   # 禁用 secure 入口（回退普通入口）
 ```
 
+### 3.4.1 「锁屏后相机里的音量键功能失效」≠ 模块的问题
+
+已定位（详见 `docs/double-tap-power-wallet-hijack.md` §11.11）：
+
+* 本机相机「音量键功能」= **快门**（MMKV `pref_volume_key_function_key` = `shutter`），
+  不是变焦——用「缩放条有没有变」来判断会误判。
+* 锁屏与解锁态，相机**都能收到**音量键（`W OCAM_OplusCamera: Key down has been intercepted`）。
+* 用**从桌面正常启动**的相机 + `adb shell input keyevent 24` 注入，**同样不会触发快门**
+  ⇒ 与本模块无关；ADB 注入事件没有 scanCode/deviceId，与真实按键不等价。
+
+请用**真实按键**对照验证（脚本会自动判定是否真的拍下照）：
+
+```bash
+bash scripts/volume-key-check.sh locked     # 锁屏，脚本会提示你按一次真实音量↑
+bash scripts/volume-key-check.sh unlocked   # 解锁（对照组）
+```
+
+若真实按键在解锁态能拍照、锁屏态不能，则是 Android 对带密码锁屏的安全策略
+（相机可显示、拍摄需认证），可试系统自带的「锁屏快拍 / 免密拍照」开关，
+或改用更轻的入口：`adb shell settings put system doubletap_camera_lock_act 1`（直拍页）。
+
 ### 3.5 回滚
 
 ```bash

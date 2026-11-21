@@ -726,3 +726,87 @@ OCAM_CameraEntry: isLockScreenStart, ... mbSecureStartFromFramework: true,
 > 始终走 `startWallet()` → 被我们改写成启动相机。
 > 也就是说：**模块生效与「钱包自带开关」是否关闭无关**，两条链路互不依赖。
 
+
+### 11.11 「锁屏后相机内音量键功能用不了」的定位结论（重要：不是模块造成的）
+
+用户反馈：**锁屏双击电源键打开相机后，相机里的音量键功能失效**（解锁后正常）。
+
+#### 11.11.1 先把「音量键功能」到底是什么查清楚
+
+相机的音量键功能存在自己的 MMKV 里（不是 Settings）：
+
+```bash
+adb shell su -c "grep -ao 'pref_volume_key_function_key.\{0,12\}' \
+  /data/data/com.oplus.camera/files/mmkv/com.oplus.camera_preferences"
+# → pref_volume_key_function_key  shutter      ← 本机取值 = shutter（快门）
+# 另有 pref_shoulder_key_function_key = off
+```
+
+对照相机资源名：`camera_volume_key_function_{shutter,zoom,volume}`、
+`volume_key_function_values/names`、`volume_button_function_title`。
+所以本机「音量键功能」= **快门**（按音量↑/↓ = 拍照），**不是变焦**——
+用「缩放条有没有变」来判断会得出错误结论。
+
+#### 11.11.2 事件确实送到了相机（锁屏与解锁都有）
+
+```
+W OCAM_OplusCamera: Key down has been intercepted
+W OCAM_OplusCamera: Key up has been intercepted
+```
+
+来源 `Lcom/oplus/camera/Camera;->onKeyDown`（反汇编：只打日志并 `super.onKeyDown`，
+真正的音量键动作在相机 UI 层处理）。锁屏态与解锁态**都收到**，
+所以不是「事件没送达」。
+
+#### 11.11.3 关键对照实验：与模块无关
+
+用**正常方式**（从桌面图标）启动相机，再按音量↑，**同样没有快门动作**：
+
+```bash
+adb shell am start -n com.oplus.camera/.Camera   # 正常启动（非模块路径）
+adb shell input keyevent 24                       # 注入音量↑
+# 相机日志：只有 'Key down has been intercepted'，没有
+#   OCAM_CameraControlUI: onShutterButtonClick
+#   OCAM_CommonCapMode: onCameraShutterButtonClick
+#   OCAM_g1_BaseMode: CameraTest Shutter Respond Start
+```
+
+对比「点按快门按钮」时相机会打出上面那三行日志（可用作拍照是否发生的签名）。
+⇒ **锁屏相机音量键失效不是 LSPosed 模块引入的**；ADB 的 `input keyevent`
+与真实按键不等价（没有 scanCode / deviceId），注入事件无法触发相机的音量键动作。
+
+#### 11.11.4 结论与验证方法
+
+* 模块侧无需改动：模块只负责「把双击电源键的启动目标从钱包换成相机」，
+  相机内部行为与它无关。
+* 要判定「锁屏到底是不是真的不能用」，必须用**真实音量键**验证：
+
+```bash
+bash scripts/volume-key-check.sh locked      # 锁屏场景，脚本会提示你按真实音量↑
+bash scripts/volume-key-check.sh unlocked    # 解锁场景，对照组
+```
+
+脚本会自动输出：按键是否送达相机、是否触发快门（按上面三行日志判定）、
+`isLockScreenStart / mbSecureStartFromFramework / isDeviceLocked` 标志、缩放条前后对比。
+
+* 若真实按键在解锁态能拍照、锁屏态不能，那就是 **Android 对带密码锁屏的安全策略**
+  （相机可显示，但拍摄需要认证）——这时可考虑系统自带的「锁屏快拍 / 锁屏下不输入密码即可拍照」
+  开关；或改用更轻的入口（下面 11.11.5）。
+* 若真实按键在锁屏态也能拍照，则此前的现象只是 ADB 注入的假象。
+
+#### 11.11.5 备选入口：`doubletap_camera_lock_act`
+
+模块提供的 `Settings.System "doubletap_camera_lock_act"`：
+
+| 值 | 锁屏时启动的 Activity | 说明 |
+|---|---|---|
+| 0（默认） | `com.oplus.camera/.Camera`（action `STILL_IMAGE_CAMERA_SECURE`） | 完整相机界面 |
+| 1 | `com.oplus.camera/.component.CapturePhotoActivity` | 厂商的「直拍页」，manifest 带 `showWhenLocked` + `turnScreenOn` + action `IMAGE_CAPTURE`，界面更轻 |
+| 2 | `com.oplus.camera/.Camera`（普通 action） | 兜底 |
+
+```bash
+adb shell settings put system doubletap_camera_lock_act 1
+adb shell input keyevent 26 26      # 锁屏双击 → CapturePhotoActivity
+adb shell settings put system doubletap_camera_lock_act 0   # 还原
+```
+实测：值=1 时锁屏双击确实进入 `com.oplus.camera/.component.CapturePhotoActivity`（已验证）。
