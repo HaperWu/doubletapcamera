@@ -14,9 +14,21 @@ echo "模块 APK: $APK"
 
 TMP=build/lspdb_work
 mkdir -p "$TMP"
+# 注意：必须等 cp 完成再 pull，否则可能拉到被截断的文件（曾出现 4096/61440 的半截库）
+adb shell su -c "cp /data/adb/lspd/config/modules_config.db /data/local/tmp/mc; cp /data/adb/lspd/config/modules_config.db-wal /data/local/tmp/mc-wal; cp /data/adb/lspd/config/modules_config.db-shm /data/local/tmp/mc-shm" >/dev/null 2>&1 || true
+sleep 1
 for f in "" "-wal" "-shm"; do
-  adb shell su -c "cp /data/adb/lspd/config/modules_config.db$f /data/local/tmp/mc$f" >/dev/null 2>&1 || true
-  adb pull "/data/local/tmp/mc$f" "$TMP/mc.db$f" >/dev/null 2>&1 || true
+  for i in 1 2 3; do
+    adb pull "/data/local/tmp/mc$f" "$TMP/mc.db$f" >/dev/null 2>&1 || true
+    # 主库期望 >= 61440 字节，拉全了就停
+    if [ -z "$f" ]; then
+      sz=$(stat -c%s "$TMP/mc.db" 2>/dev/null || echo 0)
+      [ "${sz:-0}" -ge 61440 ] && break
+    else
+      break
+    fi
+    sleep 1
+  done
 done
 
 python3 - "$TMP/mc.db" "$PKG" "$APK" "${SCOPES[@]}" <<'PY'
